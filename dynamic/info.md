@@ -1,13 +1,24 @@
+---
+
 # New EFT
 This section will allow you to create a new EFT! Currently, it will only permit you to create an EFT with Type-14 records (Left Slap, Right Slap, and Thumbs), as the ATF requires a transaction type of FAUF for eForms. Per the EBTS specifications, EFTs with a TOT (Type of Transaction) flag of FAUF *only* uses Type-14 records. Type 4 records (rolled) are not used and are not necessary to include.
+
+---
+
 # Capture Prints
 This function will allow OpenEFT 2 to interface with a physical fingerprint scanner and capture prints directly into the OEFT2 software. You *must* use the included helper application (which only supports Windows 10 and Windows 11 at this time) to bridge the scanner with OEFT2. This is due to a limitation with Chromium's native WebUSB API. You must also have the proper drivers for your scanner installed, which should be included for the supported devices below.
+
+---
+
 ## Supported Devices
 The following devices are known to work with OpenEFT 2:
 * Integrated Biometrics Kojak
 * Possibly other IB ten-print scanners that use the same SDK
 
 > *Please note*: We will not be adding support for Identification International devices (like the i3), as the company was not willing to provide the SDK for integration. If you have access to the SDK and would like us to help with integration, please reach out.
+
+---
+
 # View/Edit EFT
 ## Read Only Mode
 This mode will allow you to read an EFT's contents. It will display both the raw an2k output as well as the Type 2 (demographic) and Type-14 (print) records.
