@@ -23,7 +23,7 @@ This new version of OpenEFT ("OpenEFT 2") is a completely new app from the origi
 ## Prerequisites
 
 - **Docker**: The application is containerized. Ensure Docker is installed on your machine.
--     **Docker Hub**: You can pull this directly from [Docker Hub](https://hub.docker.com/repository/docker/robbstumpf/openeft2)
+- **Docker Hub**: You can pull this directly from [Docker Hub](https://hub.docker.com/repository/docker/robbstumpf/openeft2)
 
 ## Build & Run
 
