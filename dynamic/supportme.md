@@ -6,5 +6,5 @@ If you're happy about saving a few bucks on fingerprinting and want to send a th
 
 **Prefer to just buy me a coffee?**
 * [Venmo](https://venmo.com/robbstumpf)
-* [PayPal](https://www.paypal.com/paypalme/robbstumpf)
+* [PayPal](https://paypal.me/RobDrivesCars)
 * [CashApp](https://cash.app/$RobStumpf)
