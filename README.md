@@ -4,7 +4,7 @@
 
 EFT Suite is a lightweight web application for converting physical fingerprint cards into digital EFT files for use with ATF's eForms application.
 
-This new version of EFT Suite is inspired by the original OpenEFT (which I've been maintaining since early 2024) and uses the NIST Biometric Image Software (NBIS) to handle the conversion. It is a completely new rewrite that is independent of OpenEFT but serves the same purpose: to build EFTs for you with zero upfront cost.
+This new version of EFT Suite is inspired by the original OpenEFT (which I've been maintaining since 2024) and uses the NIST Biometric Image Software (NBIS) to handle the conversion. It is a completely new rewrite that is independent of OpenEFT but serves the same purpose: to build EFTs for you with zero upfront cost.
 
 ## Features
 
