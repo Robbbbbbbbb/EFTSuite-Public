@@ -4,7 +4,7 @@ services:
     image: robbstumpf/eftsuite:latest
     restart: unless-stopped
     ports:
-      - "8085:8080" #you can change 8085 to whatever port you would like to expose on the host
+      - "8080:8080" #you can change the first port ("8080":8080) to whatever port you would like to expose on the host. By default, it is 8080
     volumes:
       - "./data:/app/temp" #OPTIONAL: this will mount the temp dir where generated eft files are stored.
     logging: #all logging config is optional too
