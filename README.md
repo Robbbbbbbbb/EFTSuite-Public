@@ -67,6 +67,19 @@ docker run -p 8080:8080 robbstumpf/eftsuite
 Open your browser and navigate to:
 [http://localhost:8080](http://localhost:8080)
 
+## Docker Compose
+
+Ensure you have the docker compose tool [https://docs.docker.com/compose/install/](installed).
+
+### 1. Copy the `docker-compose.yml` file from the root of this repo
+
+### 2. Make any changes to docker-compose.yml (ports, volumes, logging, etc)
+`cd location/of/docker-compose.yml`
+`nvim docker-compose.yml` (or editor of your choice)
+
+### 3. Pull/build/run container
+`docker compose up -d`
+
 ## Usage Guide
 
 
