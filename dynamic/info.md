@@ -34,4 +34,4 @@ This mode is an "Advanced" mode that allows the user to edit the raw values of a
 OEFT2 is here! Aside from the complete rewrite, there are two improvements worth noting here:
 
 1. TCN (transaction number) is shortened to appease the requirements of Silencer Central
-2. Type 4 records are now createable to appease SilenecerShop (which requires Type 4 records for some reason). I recommend using Type 14 records (ATF-compliant) unless you explicitly need Type 4 records.
+2. Type 4 records are now createable to appease Silencer Shop (which requires Type 4 records for some reason). I recommend using Type 14 records (ATF-compliant) unless you explicitly need Type 4 records.
