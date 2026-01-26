@@ -136,3 +136,8 @@ That's it, you're done! Click "Delete File & Start Over" to remove the temporary
 
 **Build Fails with "setup.sh not found":**
 Ensure you are running `docker build .` from the root of the project folder, not inside a subdirectory.
+
+# Security Warning
+
+**Never, ever expose this to the internet**
+This is not a multi-tenant product and is not tested against OWASP to securely expose to the internet. It it intended to be spun up on Docker, your prints generated, and the container destroyed. Never host this app on the internet for yourself or anyone else to use.
