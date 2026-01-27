@@ -43,7 +43,8 @@ RUN ls -l /usr/local/bin
 ENV PATH="/usr/local/bin:${PATH}"
 
 # Install Python dependencies
-RUN pip install --no-cache-dir fastapi uvicorn python-multipart opencv-python-headless numpy imutils pillow jinja2
+# Install Python dependencies
+RUN pip install --no-cache-dir -r requirements.txt
 
 # Create directory for temp files
 RUN mkdir -p /app/temp

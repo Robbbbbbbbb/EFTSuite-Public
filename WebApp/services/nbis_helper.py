@@ -195,3 +195,45 @@ def convert_wsq_to_raw(wsq_path: str) -> str:
         
     raise Exception(f"dwsq ran but output file not found for {wsq_path}")
 
+def convert_to_wsq(raw_path: str, output_path: str, width: int, height: int, bitrate: float = 2.25, depth: int = 8, ppi: int = 500) -> str:
+    """
+    Compresses a raw image to WSQ using `cwsq`.
+    
+    Args:
+        raw_path: Path to the input raw image.
+        output_path: Path to the output WSQ file.
+        width: Image width.
+        height: Image height.
+        bitrate: Compression bitrate (e.g. 0.75, 2.25).
+        depth: Bit depth (default 8).
+        ppi: Pixels per inch (default 500).
+        
+    Returns:
+        Path to the generated WSQ file.
+    """
+    # cwsq <rate> wsq <outfile> -r <infile> <w> <h> <depth> <ppi>
+    # Note: cwsq arguments might vary by version, but this is the standard NBIS usage.
+    
+    command = [
+        "cwsq", 
+        str(bitrate), 
+        "wsq", 
+        output_path, 
+        "-r", 
+        raw_path, 
+        str(width), 
+        str(height), 
+        str(depth), 
+        str(ppi)
+    ]
+    
+    stdout, stderr, returncode = run_command(command, cwd=os.path.dirname(raw_path))
+    
+    if returncode != 0:
+        raise Exception(f"cwsq failed: {stderr}")
+        
+    if not os.path.exists(output_path):
+        raise Exception(f"cwsq failed to create output file: {stderr}")
+        
+    return output_path
+

@@ -6,3 +6,4 @@ numpy
 imutils
 pillow
 jinja2
+pymupdf

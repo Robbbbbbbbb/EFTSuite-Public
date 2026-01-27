@@ -12,6 +12,11 @@ try:
     import cv2
 except ImportError:
     cv2 = None
+try:
+    import fitz # PyMuPDF
+except ImportError:
+    fitz = None
+
 from typing import List, Dict, Optional, Any, Union
 
 from services.image_processing import align_image, get_default_boxes, apply_crop_and_rotate
@@ -68,7 +73,7 @@ class GenerateRequest(BaseModel):
     session_id: str
     boxes: List[Box]
     type2_data: Dict[str, Any]
-    mode: Optional[str] = "atf" # 'atf' or 'rolled'
+    mode: Optional[str] = "rolled" # 'atf' or 'rolled'
 
 class CaptureSessionRequest(BaseModel):
     l_slap: Optional[str] = None
@@ -80,6 +85,10 @@ class CaptureSessionRequest(BaseModel):
 class SaveEFTRequest(BaseModel):
     session_id: str
     type2_data: Dict[str, Any]
+
+class SelectPageRequest(BaseModel):
+    session_id: str
+    page_index: int
 
 # Serves the main SPA.
 @app.get("/")
@@ -95,12 +104,94 @@ async def upload_image(file: UploadFile = File(...)):
     session_dir = os.path.join(TMP_DIR, session_id)
     os.makedirs(session_dir, exist_ok=True)
     
-    file_path = os.path.join(session_dir, "original.jpg")
+    # Determine extension
+    ext = os.path.splitext(file.filename)[1].lower()
+    if not ext:
+        ext = ".jpg"
+
+    file_path = os.path.join(session_dir, "original" + ext)
     with open(file_path, "wb") as buffer:
         shutil.copyfileobj(file.file, buffer)
         
-    # For Step 1.5, we just return the uploaded image as base64
     try:
+        # Check if PDF
+        if ext == ".pdf":
+            if fitz is None:
+                raise HTTPException(status_code=500, detail="PyMuPDF (fitz) is not installed")
+            
+            doc = fitz.open(file_path)
+            page_count = doc.page_count
+            
+            if page_count == 1:
+                # Auto-convert single page
+                page = doc.load_page(0)
+                # Render at high resolution (500 DPI)
+                zoom = 500 / 72
+                mat = fitz.Matrix(zoom, zoom)
+                pix = page.get_pixmap(matrix=mat)
+                
+                img_path = os.path.join(session_dir, "original.png") # Convert to PNG
+                pix.save(img_path)
+                
+                # Update session path to point to the image
+                file_path = img_path
+                
+                # Continue as normal image upload...
+                with open(file_path, "rb") as f:
+                    img_bytes = f.read()
+                    img_base64 = base64.b64encode(img_bytes).decode('utf-8')
+                
+                SESSIONS[session_id] = {
+                    "image_path": file_path,
+                    "boxes": []
+                }
+                
+                return {
+                    "session_id": session_id,
+                    "image_base64": img_base64
+                }
+            else:
+                # Multi-page PDF - Request selection
+                previews = []
+                for i in range(page_count):
+                    page = doc.load_page(i)
+                    # Render thumbnail (low res)
+                    zoom = 0.5 
+                    mat = fitz.Matrix(zoom, zoom)
+                    pix = page.get_pixmap(matrix=mat)
+                    
+                    # Get base64
+                    img_data = pix.tobytes("png")
+                    b64 = base64.b64encode(img_data).decode('utf-8')
+                    previews.append(b64)
+                
+                # Save session state
+                SESSIONS[session_id] = {
+                    "mode": "pdf_select",
+                    "pdf_path": file_path,
+                    "page_count": page_count
+                }
+                
+                return {
+                    "session_id": session_id,
+                    "type": "pdf_selection",
+                    "pages": previews
+                }
+
+        # Normal Image Processing
+        # If we are here, it's not a PDF or it was converted already
+        
+        # Check Resolution (PPI)
+        # Standard FD-258 is 8 inches wide. 500 PPI = 4000 pixels.
+        warning = None
+        if cv2 is not None:
+            img = cv2.imread(file_path)
+            if img is not None:
+                h, w = img.shape[:2]
+                ppi = w / 8.0
+                if ppi < 490: # Allow slight buffer
+                    warning = f"Low resolution detected (~{int(ppi)} PPI). Minimum 500 PPI (4000px width) is required for valid EFTs."
+
         # Read the image to get base64
         with open(file_path, "rb") as f:
             img_bytes = f.read()
@@ -113,9 +204,60 @@ async def upload_image(file: UploadFile = File(...)):
         
         return {
             "session_id": session_id,
-            "image_base64": img_base64
+            "image_base64": img_base64,
+            "warning": warning
         }
     except Exception as e:
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/select_pdf_page")
+async def select_pdf_page(data: SelectPageRequest):
+    session_id = data.session_id
+    if session_id not in SESSIONS:
+        raise HTTPException(status_code=404, detail="Session not found")
+        
+    session_data = SESSIONS[session_id]
+    if session_data.get("mode") != "pdf_select":
+        raise HTTPException(status_code=400, detail="Invalid session mode")
+        
+    pdf_path = session_data["pdf_path"]
+    page_idx = data.page_index
+    
+    try:
+        doc = fitz.open(pdf_path)
+        if page_idx < 0 or page_idx >= doc.page_count:
+             raise HTTPException(status_code=400, detail="Invalid page index")
+             
+        page = doc.load_page(page_idx)
+        # Render high res (500 DPI)
+        zoom = 500 / 72
+        mat = fitz.Matrix(zoom, zoom)
+        pix = page.get_pixmap(matrix=mat)
+        
+        session_dir = os.path.dirname(pdf_path)
+        img_path = os.path.join(session_dir, "original.png")
+        pix.save(img_path)
+        
+        # Update session
+        SESSIONS[session_id] = {
+            "image_path": img_path,
+            "boxes": []
+        }
+        
+        # Return base64
+        with open(img_path, "rb") as f:
+            b64 = base64.b64encode(f.read()).decode('utf-8')
+            
+        return {
+            "session_id": session_id,
+            "image_base64": b64
+        }
+        
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
 
 # Creates a session from captured live scans.
@@ -205,7 +347,12 @@ async def process_crop(data: CropRequest):
         
     # Get session directory
     session_dir = os.path.join(TMP_DIR, session_id)
-    original_path = os.path.join(session_dir, "original.jpg")
+    
+    # Use image path from session if available (handles png from pdfs)
+    if "image_path" in SESSIONS[session_id]:
+        original_path = SESSIONS[session_id]["image_path"]
+    else:
+        original_path = os.path.join(session_dir, "original.jpg")
     
     # Process crop
     try:
@@ -336,10 +483,10 @@ async def generate_eft_endpoint(data: GenerateRequest):
 
                 # Capture mode processing
                 if data.mode == "rolled":
-                    result_path = fp.process_and_convert_type4(compression_ratio=10)
+                    result_path = fp.process_and_convert_raw(type4=True)
                 else: 
                     # Default Type-14 Capture
-                    result_path = fp.process_and_convert(compression_ratio=10)
+                    result_path = fp.process_and_convert_raw()
 
                 if result_path:
                     prints_map[box.fp_number] = fp
@@ -351,6 +498,22 @@ async def generate_eft_endpoint(data: GenerateRequest):
         for box in data.boxes:
             # Cast to int for slicing
             x, y, w, h = int(box.x), int(box.y), int(box.w), int(box.h)
+            
+            # Validate bounds
+            if w <= 0 or h <= 0:
+                print(f"Skipping invalid box {box.fp_number}: w={w}, h={h}")
+                continue
+                
+            # Ensure within image dimensions
+            y = max(0, y)
+            x = max(0, x)
+            h = min(h, img.shape[0] - y)
+            w = min(w, img.shape[1] - x)
+            
+            if w <= 0 or h <= 0:
+                 print(f"Skipping empty crop for FP {box.fp_number}")
+                 continue
+
             crop = img[y:y+h, x:x+w]
             
             fp = Fingerprint(crop, box.fp_number, session_dir, session_id)
@@ -358,9 +521,9 @@ async def generate_eft_endpoint(data: GenerateRequest):
             
             # Select processing method based on requested mode (rolled or flat)
             if data.mode == "rolled":
-                result_path = fp.process_and_convert_type4(compression_ratio=10)
+                result_path = fp.process_and_convert_raw(type4=True)
             else:
-                result_path = fp.process_and_convert(compression_ratio=10) # Default ratio
+                result_path = fp.process_and_convert_raw() # Default raw
             
             # Add processed fingerprint to prints_map
             if result_path:
@@ -372,28 +535,33 @@ async def generate_eft_endpoint(data: GenerateRequest):
             else:
                  print(f"ERROR: Failed to process FP {box.fp_number}")
             
+    # Check if we have any valid objects
+    if not fp_objects:
+        raise HTTPException(status_code=400, detail="No valid fingerprints found to generate EFT.")
+
     # Generate EFT with size safeguard
     try:
-        # Initial generation with default compression
+        # Initial generation with NO compression (Raw)
         eft_path = generate_eft(data.type2_data, session_id, {fp.fp_number: fp for fp in fp_objects}, mode=data.mode)
         
-        # Check size (Max 11MB)
-        max_size = 11 * 1024 * 1024
+        # Check size (Max 11.8 MB)
+        max_size = 11.8 * 1024 * 1024
         current_size = os.path.getsize(eft_path)
         
         retries = 0
-        ratios = [15, 20, 30] # Progressive compression ratios in case file exceeds limit
+        # WSQ Bitrates: Start high (2.25) and decrease by 0.5
+        bitrates = [2.25, 1.75, 1.25, 0.75] 
         
         # Re-compress and re-generate EFT if file exceeds limit
-        while current_size > max_size and retries < len(ratios):
-            print(f"EFT size {current_size} exceeds limit. Re-compressing with ratio {ratios[retries]}...")
+        while current_size > max_size and retries < len(bitrates):
+            print(f"EFT size {current_size} exceeds limit. Re-compressing with WSQ bitrate {bitrates[retries]}...")
             
             # Re-compress all images
             for fp in fp_objects:
                 if data.mode == "rolled":
-                    fp.process_and_convert_type4(compression_ratio=ratios[retries])
+                    fp.process_and_convert_wsq(bitrate=bitrates[retries], type4=True)
                 else:
-                    fp.process_and_convert(compression_ratio=ratios[retries])
+                    fp.process_and_convert_wsq(bitrate=bitrates[retries])
             
             # Re-generate EFT
             eft_path = generate_eft(data.type2_data, session_id, {fp.fp_number: fp for fp in fp_objects}, mode=data.mode)
@@ -402,7 +570,7 @@ async def generate_eft_endpoint(data: GenerateRequest):
         
         # If file still exceeds limit after all retries, raise error
         if current_size > max_size:
-            raise HTTPException(status_code=400, detail=f"EFT size ({current_size} bytes) exceeds 11MB limit even after compression.")
+            raise HTTPException(status_code=400, detail=f"EFT size ({current_size} bytes) exceeds 11.8MB limit even after compression.")
         
         # Determine Filename
         fname = data.type2_data.get("fname", "Unknown")
@@ -413,7 +581,7 @@ async def generate_eft_endpoint(data: GenerateRequest):
         safe_lname = "".join(c for c in lname if c.isalnum() or c in ('-', '_'))
         
         # Generate filename
-        filename = f"oeft-{safe_fname}-{safe_lname}.eft"
+        filename = f"EFT-{safe_fname}-{safe_lname}.eft"
         
         # Rename the generated file to the user-friendly name
         new_path = os.path.join(session_dir, filename)

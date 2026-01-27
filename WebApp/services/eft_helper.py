@@ -322,7 +322,21 @@ class Type4(Record):
         self.isr = 0 # Image scanning resolution (0=Native)
         self.hll = int(f.hll)
         self.vll = int(f.vll)
-        self.cga = 1 # CGA 1 = WSQ (per requirements, despite data being JP2)
+        
+        # Determine CGA based on Fingerprint object
+        if hasattr(f, 'cga'):
+            if f.cga == "NONE":
+                self.cga = 0
+            elif f.cga == "WSQ20" or f.cga == "WSQ":
+                self.cga = 1
+            elif f.cga == "JP2":
+                self.cga = 4
+            elif f.cga == "PNG":
+                self.cga = 5
+            else:
+                self.cga = 1 # Default to WSQ if unknown (legacy behavior)
+        else:
+            self.cga = 1 # Default
         
         if hasattr(f, 'converted'):
             self.file = f.converted

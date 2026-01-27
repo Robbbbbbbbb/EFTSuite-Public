@@ -46,50 +46,55 @@ def apply_crop_and_rotate(img_path, rotate_angle, crop_rect):
 
 # Returns the default bounding boxes scaled to the image size
 def get_default_boxes(img_shape):
-    # NOTE: This logic is based on the FD-258 format for the three Type 14 records, define Type-4 logic later.
-    # Approximated relative coordinates for FD-258: (x_percent, y_percent, w_percent, h_percent)
-    
-    defaults = {
-        # Rolled Prints (Row 1 - Right Hand)
-        "R_THUMB":  (0.20, 0.35, 0.16, 0.16),
-        "R_INDEX":  (0.36, 0.35, 0.16, 0.16),
-        "R_MIDDLE": (0.52, 0.35, 0.16, 0.16),
-        "R_RING":   (0.68, 0.35, 0.16, 0.16),
-        "R_LITTLE": (0.84, 0.35, 0.16, 0.16),
+    # Dimensions based on 8x8 inch card area
+    # Rolls: 1.6" x 1.5" -> 0.20w, 0.1875h
+    # Plain Thumbs: 1.0" x 2.0" -> 0.125w, 0.25h
+    # Slaps: 3.0" x 2.0" -> 0.375w, 0.25h (Scaled to fit 8" width: 3+1+1+3 = 8)
 
-        # Rolled Prints (Row 2 - Left Hand)
-        "L_THUMB":  (0.20, 0.52, 0.16, 0.16),
-        "L_INDEX":  (0.36, 0.52, 0.16, 0.16),
-        "L_MIDDLE": (0.52, 0.52, 0.16, 0.16),
-        "L_RING":   (0.68, 0.52, 0.16, 0.16),
-        "L_LITTLE": (0.84, 0.52, 0.16, 0.16),
+    w_roll = 0.18  # Reduced by 10%
+    h_roll = 0.16875 # Reduced by 10%
+    w_plain = 0.10 # Reduced by 20%
+    h_plain = 0.20 # Reduced by 20%
+    w_slap = 0.375
+    h_slap = 0.25
+    
+    y_row1 = 0.33
+    y_row2 = 0.53
+    y_row3 = 0.74
+    
+    defaults = [
+        # Row 1: Right Hand Rolls
+        {"id": "Right Thumb", "num": 1, "x": 0.0, "y": y_row1, "w": w_roll, "h": h_roll},
+        {"id": "Right Index", "num": 2, "x": 0.20, "y": y_row1, "w": w_roll, "h": h_roll},
+        {"id": "Right Middle", "num": 3, "x": 0.40, "y": y_row1, "w": w_roll, "h": h_roll},
+        {"id": "Right Ring", "num": 4, "x": 0.60, "y": y_row1, "w": w_roll, "h": h_roll},
+        {"id": "Right Little", "num": 5, "x": 0.80, "y": y_row1, "w": w_roll, "h": h_roll},
 
-        # Plain/Slap Impressions (Row 3)
-        "L_SLAP": (0.04, 0.74, 0.30, 0.22),
-        "R_SLAP": (0.66, 0.74, 0.30, 0.22),
-        "THUMBS": (0.36, 0.74, 0.28, 0.22)
-    }
-    
-    h, w = img_shape[:2]
-    boxes = []
-    
-    mapping = [
-        ("R_THUMB", 1), ("R_INDEX", 2), ("R_MIDDLE", 3), ("R_RING", 4), ("R_LITTLE", 5),
-        ("L_THUMB", 6), ("L_INDEX", 7), ("L_MIDDLE", 8), ("L_RING", 9), ("L_LITTLE", 10),
-        ("L_SLAP", 14), 
-        ("R_SLAP", 13), 
-        ("THUMBS", 15)
+        # Row 2: Left Hand Rolls
+        {"id": "Left Thumb", "num": 6, "x": 0.0, "y": y_row2, "w": w_roll, "h": h_roll},
+        {"id": "Left Index", "num": 7, "x": 0.20, "y": y_row2, "w": w_roll, "h": h_roll},
+        {"id": "Left Middle", "num": 8, "x": 0.40, "y": y_row2, "w": w_roll, "h": h_roll},
+        {"id": "Left Ring", "num": 9, "x": 0.60, "y": y_row2, "w": w_roll, "h": h_roll},
+        {"id": "Left Little", "num": 10, "x": 0.80, "y": y_row2, "w": w_roll, "h": h_roll},
+
+        # Row 3: Plains
+        {"id": "Left 4 Fingers", "num": 14, "x": 0.0, "y": y_row3, "w": w_slap, "h": h_slap},
+        {"id": "Left Thumb Plain", "num": 12, "x": 0.375, "y": y_row3, "w": w_plain, "h": h_slap},
+        {"id": "Right Thumb Plain", "num": 11, "x": 0.50, "y": y_row3, "w": w_plain, "h": h_slap},
+        {"id": "Right 4 Fingers", "num": 13, "x": 0.625, "y": y_row3, "w": w_slap, "h": h_slap},
     ]
     
-    for name, num in mapping:
-        xp, yp, wp, hp = defaults[name]
+    h_img, w_img = img_shape[:2]
+    boxes = []
+    
+    for box in defaults:
         boxes.append({
-            "id": name,
-            "fp_number": num,
-            "x": int(xp * w),
-            "y": int(yp * h),
-            "w": int(wp * w),
-            "h": int(hp * h)
+            "id": box["id"],
+            "fp_number": box["num"],
+            "x": int(box["x"] * w_img),
+            "y": int(box["y"] * h_img),
+            "w": int(box["w"] * w_img),
+            "h": int(box["h"] * h_img)
         })
             
     return boxes

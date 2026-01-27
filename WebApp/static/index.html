@@ -70,7 +70,7 @@
             </ul>
             <div style="flex: 1"></div>
             <div style="padding: 20px; color: #555; font-size: 0.8rem; text-align: center; border-top: 1px solid #555;">
-                <div style="margin-bottom: 5px;">v2.0.1</div>
+                <div style="margin-bottom: 5px;">v2.0.2</div>
                 <div id="latest-version-container">Latest: <span id="latest-version-text">...</span></div>
             </div>
         </aside>
@@ -103,26 +103,82 @@
                     <div
                         style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px;">
                         <h2>Live Capture</h2>
-                        <div id="scanner-status"
-                            style="padding: 5px 10px; border-radius: 4px; background: #555; font-size: 0.9rem;">
-                            ⚪ Scanner Disconnected
+                        <div style="display: flex; gap: 10px; align-items: center;">
+                            <div id="scanner-status"
+                                style="padding: 5px 10px; border-radius: 4px; background: #555; font-size: 0.9rem;">
+                                ⚪ Scanner Disconnected
+                            </div>
+                            <div style="position: relative;">
+                                <button id="btn-scanner-settings" class="btn btn-secondary" style="padding: 5px 10px;"
+                                    title="Scanner Settings">
+                                    ⚙️ Config
+                                </button>
+                                <div id="config-tooltip"
+                                    style="position: absolute; top: 120%; right: 0; background: #222; border: 1px solid #444; padding: 10px; border-radius: 4px; width: 220px; z-index: 100; box-shadow: 0 4px 10px rgba(0,0,0,0.5);">
+                                    <div
+                                        style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 5px;">
+                                        <strong style="font-size: 0.75rem; color: #888;">TIP</strong>
+                                        <span style="cursor: pointer; color: #aaa; font-size: 1rem; line-height: 0.5;"
+                                            onclick="document.getElementById('config-tooltip').style.display='none'">&times;</span>
+                                    </div>
+                                    <p style="font-size: 0.8rem; margin: 0; color: #ccc; line-height: 1.3;">
+                                        Click here to change the address of the helper - useful if you are using <a
+                                            href="https://github.com/Robbbbbbbbb/portaprint-public" target="_blank"
+                                            style="color: var(--accent-color); text-decoration: none;">Portaprint</a>
+                                        from
+                                        a remote computer.
+                                    </p>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Settings Modal (Hidden by default) -->
+                    <div id="scanner-settings-modal" class="hidden"
+                        style="background: #222; padding: 20px; border-radius: 8px; border: 1px solid #444; margin-bottom: 20px;">
+                        <h3 style="margin-bottom: 15px;">Scanner Connection Settings</h3>
+                        <div style="display: flex; gap: 15px; align-items: flex-end;">
+                            <div class="form-group" style="flex: 2;">
+                                <label>Scanner IP Address</label>
+                                <input type="text" id="setting-scanner-ip" placeholder="localhost" value="localhost">
+                            </div>
+                            <div class="form-group" style="flex: 1;">
+                                <label>Port</label>
+                                <input type="text" id="setting-scanner-port" placeholder="8888" value="8888">
+                            </div>
+                            <div style="padding-bottom: 2px;">
+                                <button id="btn-save-settings" class="btn">Save & Connect</button>
+                                <button id="btn-cancel-settings" class="btn btn-secondary"
+                                    style="margin-left: 5px;">Cancel</button>
+                                <button id="btn-reset-settings" class="btn btn-secondary"
+                                    style="margin-left: 5px;">Reset Defaults</button>
+                            </div>
                         </div>
                     </div>
 
                     <div class="panel">
                         <!-- Mode Selection (New) -->
                         <div id="capture-mode-select" style="text-align: center; padding: 40px 0;">
-                            <h2 style="margin-bottom: 30px;">Select Capture Type</h2>
-                            <div style="display: flex; gap: 20px; justify-content: center;">
-                                <div class="mode-selection-card" id="btn-cap-mode-slaps">
-                                    <h3>Slaps (Type-14)</h3>
-                                    <p>Standard Live Scan</p>
-                                    <small style="color: #aaa;">(Left Slap, Right Slap, Thumbs)</small>
-                                </div>
-                                <div class="mode-selection-card" id="btn-cap-mode-full">
-                                    <h3>Full (Type-4)</h3>
+                            <h2 style="margin-bottom: 30px;">Start Capture</h2>
+                            <div
+                                style="display: flex; gap: 20px; justify-content: center; flex-direction: column; align-items: center;">
+                                <div class="mode-selection-card" id="btn-cap-mode-full" style="max-width: 300px;">
+                                    <h3>Start Capture Session</h3>
                                     <p>Full Fingerprint Card</p>
                                     <small style="color: #aaa;">(14 Images: Rolled + Plains)</small>
+                                </div>
+
+                                <div style="margin-top: 20px;">
+                                    <label
+                                        style="display: flex; align-items: center; cursor: pointer; user-select: none;">
+                                        <input type="checkbox" id="chk-express-mode"
+                                            style="width: 20px; height: 20px; margin-right: 10px;">
+                                        <div style="text-align: left;">
+                                            <span style="font-weight: bold; font-size: 1.1rem;">Express Mode</span><br>
+                                            <small style="color: #aaa;">Auto-accept prints (No confirmation
+                                                needed)</small>
+                                        </div>
+                                    </label>
                                 </div>
                             </div>
                         </div>
@@ -197,9 +253,38 @@
                                 <h2>Upload Fingerprint Card</h2>
                                 <p>Select a high-resolution scan (600 DPI recommended) of an FD-258 card.</p>
                                 <br>
-                                <input type="file" id="file-input" accept="image/*" class="hidden">
+                                <input type="file" id="file-input" accept="image/*,.pdf" class="hidden">
                                 <button class="btn" onclick="document.getElementById('file-input').click()">Choose
                                     File</button>
+                            </div>
+                        </div>
+
+                        <!-- View: PPI Warning -->
+                        <div id="view-warning" class="hidden"
+                            style="text-align: center; max-width: 500px; margin: 0 auto;">
+                            <h2 style="margin-bottom: 20px; color: #e74c3c;">⚠️ Low Resolution</h2>
+                            <p id="warning-text" style="color: #ccc; margin-bottom: 30px; line-height: 1.5;">
+                                WARNING: The uploaded image has a low resolution. You must only procee.
+                            </p>
+                            <div style="display: flex; gap: 20px; justify-content: center;">
+                                <button id="btn-warn-back" class="btn btn-secondary">Try Different File</button>
+                                <button id="btn-warn-proceed" class="btn"
+                                    style="background: #e67e22; color: white;">Proceed
+                                    Anyway</button>
+                            </div>
+                        </div>
+
+                        <!-- View: PDF Page Selection -->
+                        <div id="view-pdf-select" class="hidden">
+                            <h2 style="text-align: center; margin-bottom: 20px;">Select Page to Import</h2>
+                            <p style="text-align: center; color: #aaa; margin-bottom: 20px;">The uploaded PDF has
+                                multiple pages. Please select one to process.</p>
+                            <div id="pdf-pages-container"
+                                style="display: flex; flex-wrap: wrap; gap: 15px; justify-content: center; max-height: 500px; overflow-y: auto;">
+                                <!-- Pages injected here -->
+                            </div>
+                            <div style="text-align: center; margin-top: 20px;">
+                                <button id="btn-cancel-pdf" class="btn btn-secondary">Cancel</button>
                             </div>
                         </div>
 
@@ -225,13 +310,13 @@
                         <div id="view-mode-select" class="hidden">
                             <h2 style="text-align:center; margin-bottom:30px;">Select Generation Mode</h2>
                             <div style="display: flex; gap: 20px; justify-content: center;">
-                                <div class="mode-selection-card" id="btn-gen-atf">
-                                    <h3>ATF Compliant</h3>
-                                    <div
-                                        style="background: var(--accent-color); color:black; font-weight:bold; font-size:0.8rem; padding:2px 6px; border-radius:4px; display:inline-block; margin-bottom:5px;">
-                                        RECOMMENDED</div>
+                                <div class="mode-selection-card" id="btn-gen-atf"
+                                    style="opacity: 0.5; cursor: not-allowed;">
+                                    <h3>Type-14 (Legacy)</h3>
                                     <p>Standard Type-14 Records</p>
                                     <small style="color: #aaa;">(Left Slap, Right Slap, Thumbs)</small>
+                                    <div style="color: #ff4444; font-size: 0.8rem; margin-top: 5px;">No longer supported
+                                    </div>
                                 </div>
                                 <div class="mode-selection-card" id="btn-gen-rolled">
                                     <h3>Rolled Prints</h3>
