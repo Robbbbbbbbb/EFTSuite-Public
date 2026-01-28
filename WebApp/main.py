@@ -73,6 +73,7 @@ class GenerateRequest(BaseModel):
     session_id: str
     boxes: List[Box]
     type2_data: Dict[str, Any]
+    bypass_ssn: Optional[bool] = False
     mode: Optional[str] = "rolled" # 'atf' or 'rolled'
 
 class CaptureSessionRequest(BaseModel):
@@ -541,8 +542,12 @@ async def generate_eft_endpoint(data: GenerateRequest):
 
     # Generate EFT with size safeguard
     try:
+        # Inject bypass flag into type2_data for the generator
+        gen_data = data.type2_data.copy()
+        gen_data["bypass_ssn"] = data.bypass_ssn
+
         # Initial generation with NO compression (Raw)
-        eft_path = generate_eft(data.type2_data, session_id, {fp.fp_number: fp for fp in fp_objects}, mode=data.mode)
+        eft_path = generate_eft(gen_data, session_id, {fp.fp_number: fp for fp in fp_objects}, mode=data.mode)
         
         # Check size (Max 11.8 MB)
         max_size = 11.8 * 1024 * 1024
@@ -564,7 +569,7 @@ async def generate_eft_endpoint(data: GenerateRequest):
                     fp.process_and_convert_wsq(bitrate=bitrates[retries])
             
             # Re-generate EFT
-            eft_path = generate_eft(data.type2_data, session_id, {fp.fp_number: fp for fp in fp_objects}, mode=data.mode)
+            eft_path = generate_eft(gen_data, session_id, {fp.fp_number: fp for fp in fp_objects}, mode=data.mode)
             current_size = os.path.getsize(eft_path)
             retries += 1
         

@@ -126,14 +126,19 @@ def generate_eft(data: dict, session_id: str, prints_map: dict, mode: str = "atf
         t2.pob = data.get("2.020", "")
         t2.ctz = data.get("2.021", "")
         
-        # SSN Validation (9 digits, no special chars)
+        # SSN Validation Or Bypass
         raw_ssn = data.get("2.016", "")
-        clean_ssn = "".join(c for c in raw_ssn if c.isdigit())
-        if len(clean_ssn) == 9:
-            t2.ssn = clean_ssn
+        # SSN bypass logic
+        bypass_ssn = data.get("bypass_ssn", False)
+
+        if bypass_ssn:
+            t2.ssn = "" # Explicitly empty if bypassed
         else:
-            t2.ssn = ""
-            t2.ssn = clean_ssn 
+            clean_ssn = "".join(c for c in raw_ssn if c.isdigit())
+            if len(clean_ssn) == 9:
+                t2.ssn = clean_ssn
+            else:
+                t2.ssn = "" 
     
         t2.race = data.get("2.025", "")
         t2.eye = data.get("2.031", "")

@@ -342,6 +342,22 @@ document.getElementById('btn-gen-rolled').onclick = () => {
 };
 
 // STEP 1: Upload
+// SSN Bypass Logic
+const bypassChk = document.getElementById('bypass-ssn');
+if (bypassChk) {
+    bypassChk.onchange = (e) => {
+        const ssnInput = document.querySelector('input[name="2.016"]');
+        if (e.target.checked) {
+            ssnInput.value = '';
+            ssnInput.disabled = true;
+            ssnInput.required = false;
+        } else {
+            ssnInput.disabled = false;
+            ssnInput.required = true;
+        }
+    };
+}
+
 // STEP 1: Upload
 const fileInput = document.getElementById('file-input');
 const uploadArea = document.querySelector('#view-upload .upload-area');
@@ -991,6 +1007,7 @@ btnSubmit.onclick = async () => {
         session_id: sessionId,
         boxes: boxes,
         type2_data: data,
+        bypass_ssn: document.getElementById('bypass-ssn').checked,
         mode: selectedGenMode
     };
 
@@ -1051,6 +1068,7 @@ document.getElementById('btn-dl-fd258').onclick = async () => {
         session_id: sessionId,
         boxes: boxes,
         type2_data: data,
+        bypass_ssn: document.getElementById('bypass-ssn').checked,
         mode: selectedGenMode
     };
 

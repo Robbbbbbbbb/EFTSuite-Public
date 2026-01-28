@@ -353,10 +353,6 @@
                                         <label>First Name</label>
                                         <input type="text" id="fname" name="fname" required class="sentence-case">
                                     </div>
-                                    <div class="form-group">
-                                        <label>Last Name</label>
-                                        <input type="text" id="lname" name="lname" required class="sentence-case">
-                                    </div>
 
                                     <div class="form-group">
                                         <label>Middle Name (Optional)</label>
@@ -369,6 +365,12 @@
                                             </label>
                                         </div>
                                     </div>
+
+                                    <div class="form-group">
+                                        <label>Last Name</label>
+                                        <input type="text" id="lname" name="lname" required class="sentence-case">
+                                    </div>
+
                                     <div class="form-group">
                                         <label>Date of Birth</label>
                                         <input type="date" id="dob-input" name="dob" required>
@@ -385,8 +387,15 @@
 
                                     <div class="form-group span-full">
                                         <label>Social Security Number ⓘ</label>
-                                        <input type="text" name="2.016" required pattern="\d{9}"
-                                            placeholder="xxxxxxxxx">
+                                        <div style="display: flex; gap: 10px; align-items: center;">
+                                            <input type="text" name="2.016" required pattern="\d{9}"
+                                                placeholder="xxxxxxxxx" style="flex: 1;">
+                                            <label
+                                                style="display: flex; align-items: center; white-space: nowrap; font-size: 0.9rem;">
+                                                <input type="checkbox" id="bypass-ssn"
+                                                    style="width: auto; margin-right: 5px;"> Bypass SSN
+                                            </label>
+                                        </div>
                                     </div>
                                 </div>
                             </div>
@@ -442,18 +451,14 @@
                                     </div>
 
                                     <div class="form-group">
-                                        <label>Hair Color</label>
-                                        <select name="2.032" required>
-                                            <option value="">Select...</option>
-                                            <option value="BAL">Bald</option>
-                                            <option value="BLK">Black</option>
-                                            <option value="BLN">Blonde</option>
-                                            <option value="BRO">Brown</option>
-                                            <option value="GRY">Gray</option>
-                                            <option value="RED">Red</option>
-                                            <option value="XXX">Unknown</option>
-                                        </select>
+                                        <label>Height</label>
+                                        <select id="height-select" name="2.027" required></select>
                                     </div>
+                                    <div class="form-group">
+                                        <label>Weight (lbs)</label>
+                                        <input type="number" name="2.029" min="0" max="499" required>
+                                    </div>
+
                                     <div class="form-group">
                                         <label>Eye Color</label>
                                         <select name="2.031" required>
@@ -470,12 +475,17 @@
                                     </div>
 
                                     <div class="form-group">
-                                        <label>Height</label>
-                                        <select id="height-select" name="2.027" required></select>
-                                    </div>
-                                    <div class="form-group">
-                                        <label>Weight (lbs)</label>
-                                        <input type="number" name="2.029" min="0" max="499" required>
+                                        <label>Hair Color</label>
+                                        <select name="2.032" required>
+                                            <option value="">Select...</option>
+                                            <option value="BAL">Bald</option>
+                                            <option value="BLK">Black</option>
+                                            <option value="BLN">Blonde</option>
+                                            <option value="BRO">Brown</option>
+                                            <option value="GRY">Gray</option>
+                                            <option value="RED">Red</option>
+                                            <option value="XXX">Unknown</option>
+                                        </select>
                                     </div>
                                 </div>
                             </div>
