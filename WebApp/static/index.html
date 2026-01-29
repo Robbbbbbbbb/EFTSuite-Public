@@ -69,8 +69,30 @@
                 <li id="nav-about">About</li>
             </ul>
             <div style="flex: 1"></div>
+
+            <!-- User Menu -->
+            <div id="user-menu" style="display: none; flex-direction: column; padding: 15px 20px; border-top: 1px solid #555;">
+                <div style="display: flex; align-items: center; gap: 10px; margin-bottom: 10px;">
+                    <div style="width: 32px; height: 32px; background: var(--accent-color); border-radius: 50%; display: flex; align-items: center; justify-content: center; color: #000; font-weight: bold;">
+                        <span id="user-initial">U</span>
+                    </div>
+                    <div>
+                        <div id="user-name" style="color: #fff; font-size: 0.9rem;">User</div>
+                        <div style="color: #888; font-size: 0.75rem;">Logged in</div>
+                    </div>
+                </div>
+                <div style="display: flex; gap: 8px;">
+                    <button onclick="deleteAllMyData()" class="btn btn-secondary" style="flex: 1; padding: 6px 10px; font-size: 0.75rem; background: #e74c3c; border: none;" title="Securely delete all your data">
+                        Wipe Data
+                    </button>
+                    <button onclick="logout()" class="btn btn-secondary" style="flex: 1; padding: 6px 10px; font-size: 0.75rem;" title="Sign out">
+                        Logout
+                    </button>
+                </div>
+            </div>
+
             <div style="padding: 20px; color: #555; font-size: 0.8rem; text-align: center; border-top: 1px solid #555;">
-                <div style="margin-bottom: 5px;">v2.0.2</div>
+                <div style="margin-bottom: 5px;">v2.1.0-secure</div>
                 <div id="latest-version-container">Latest: <span id="latest-version-text">...</span></div>
             </div>
         </aside>

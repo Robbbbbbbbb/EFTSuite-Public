@@ -1,5 +1,83 @@
 
+// =============================================================================
+// Authentication State
+// =============================================================================
+let authToken = null;
+let currentUser = null;
+
+// Check authentication on page load
+async function checkAuthentication() {
+    try {
+        const response = await fetch('/api/auth/me');
+        if (response.ok) {
+            currentUser = await response.json();
+            updateUserUI();
+            return true;
+        } else if (response.status === 401) {
+            // Redirect to login if auth required
+            window.location.href = '/login';
+            return false;
+        }
+    } catch (e) {
+        console.error('Auth check failed:', e);
+    }
+    return true; // Allow for auth-disabled mode
+}
+
+function updateUserUI() {
+    const userMenu = document.getElementById('user-menu');
+    const userName = document.getElementById('user-name');
+
+    if (userMenu && currentUser) {
+        userMenu.style.display = 'flex';
+        if (userName) {
+            userName.textContent = currentUser.username;
+        }
+    }
+}
+
+async function logout() {
+    try {
+        await fetch('/api/auth/logout', { method: 'POST' });
+    } catch (e) {
+        console.error('Logout error:', e);
+    }
+    window.location.href = '/login';
+}
+
+async function deleteAllMyData() {
+    if (!confirm('Are you sure you want to securely delete ALL your data? This cannot be undone.')) {
+        return;
+    }
+
+    if (!confirm('This will permanently delete all your fingerprint data and EFT files. Are you absolutely sure?')) {
+        return;
+    }
+
+    try {
+        loading.classList.remove('hidden');
+        const response = await fetch('/api/delete-all-data', { method: 'DELETE' });
+        const data = await response.json();
+
+        if (response.ok) {
+            alert(`Successfully deleted ${data.count} sessions securely.`);
+            location.reload();
+        } else {
+            alert('Error deleting data: ' + (data.detail || 'Unknown error'));
+        }
+    } catch (e) {
+        alert('Network error while deleting data');
+    } finally {
+        loading.classList.add('hidden');
+    }
+}
+
+// Initialize auth check
+checkAuthentication();
+
+// =============================================================================
 // Global State
+// =============================================================================
 let sessionId = null;
 let image = new Image(); // For verification/box selection (Step 1)
 let cropImage = new Image(); // For crop step (Step 1)

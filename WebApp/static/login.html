@@ -1,0 +1,500 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>EFTSuite - Login</title>
+    <link rel="icon" type="image/png" href="static/favico.png">
+    <link rel="stylesheet" href="static/style.css">
+    <style>
+        .login-container {
+            min-height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            background: linear-gradient(135deg, #1a1a1a 0%, #2d2d2d 100%);
+        }
+
+        .login-card {
+            background: #252525;
+            border: 1px solid #444;
+            border-radius: 12px;
+            padding: 40px;
+            width: 100%;
+            max-width: 400px;
+            box-shadow: 0 10px 40px rgba(0, 0, 0, 0.5);
+        }
+
+        .login-logo {
+            text-align: center;
+            margin-bottom: 30px;
+        }
+
+        .login-logo img {
+            max-width: 200px;
+            height: auto;
+        }
+
+        .login-title {
+            text-align: center;
+            color: #fff;
+            margin-bottom: 30px;
+            font-size: 1.5rem;
+        }
+
+        .login-form .form-group {
+            margin-bottom: 20px;
+        }
+
+        .login-form label {
+            display: block;
+            color: #aaa;
+            margin-bottom: 8px;
+            font-size: 0.9rem;
+        }
+
+        .login-form input {
+            width: 100%;
+            padding: 12px 15px;
+            background: #1a1a1a;
+            border: 1px solid #444;
+            border-radius: 6px;
+            color: #fff;
+            font-size: 1rem;
+            transition: border-color 0.2s;
+        }
+
+        .login-form input:focus {
+            outline: none;
+            border-color: var(--accent-color);
+        }
+
+        .login-form input::placeholder {
+            color: #666;
+        }
+
+        .login-btn {
+            width: 100%;
+            padding: 14px;
+            background: var(--accent-color);
+            color: #000;
+            border: none;
+            border-radius: 6px;
+            font-size: 1rem;
+            font-weight: 600;
+            cursor: pointer;
+            transition: background 0.2s, transform 0.1s;
+        }
+
+        .login-btn:hover {
+            background: #00cc7a;
+        }
+
+        .login-btn:active {
+            transform: scale(0.98);
+        }
+
+        .login-btn:disabled {
+            background: #444;
+            cursor: not-allowed;
+        }
+
+        .error-message {
+            background: rgba(231, 76, 60, 0.2);
+            border: 1px solid #e74c3c;
+            color: #e74c3c;
+            padding: 12px;
+            border-radius: 6px;
+            margin-bottom: 20px;
+            text-align: center;
+            display: none;
+        }
+
+        .success-message {
+            background: rgba(46, 204, 113, 0.2);
+            border: 1px solid #2ecc71;
+            color: #2ecc71;
+            padding: 12px;
+            border-radius: 6px;
+            margin-bottom: 20px;
+            text-align: center;
+            display: none;
+        }
+
+        .tab-container {
+            display: flex;
+            margin-bottom: 30px;
+            border-bottom: 1px solid #444;
+        }
+
+        .tab-btn {
+            flex: 1;
+            padding: 12px;
+            background: none;
+            border: none;
+            color: #888;
+            font-size: 1rem;
+            cursor: pointer;
+            transition: color 0.2s;
+            position: relative;
+        }
+
+        .tab-btn.active {
+            color: var(--accent-color);
+        }
+
+        .tab-btn.active::after {
+            content: '';
+            position: absolute;
+            bottom: -1px;
+            left: 0;
+            right: 0;
+            height: 2px;
+            background: var(--accent-color);
+        }
+
+        .tab-content {
+            display: none;
+        }
+
+        .tab-content.active {
+            display: block;
+        }
+
+        .password-requirements {
+            font-size: 0.8rem;
+            color: #888;
+            margin-top: 8px;
+            line-height: 1.4;
+        }
+
+        .password-requirements ul {
+            margin: 5px 0 0 15px;
+            padding: 0;
+        }
+
+        .password-requirements li {
+            margin: 2px 0;
+        }
+
+        .password-requirements li.valid {
+            color: #2ecc71;
+        }
+
+        .footer-links {
+            text-align: center;
+            margin-top: 20px;
+            color: #666;
+            font-size: 0.85rem;
+        }
+
+        .footer-links a {
+            color: var(--accent-color);
+            text-decoration: none;
+        }
+
+        .footer-links a:hover {
+            text-decoration: underline;
+        }
+
+        .security-notice {
+            background: #1a1a1a;
+            border: 1px solid #333;
+            border-radius: 6px;
+            padding: 15px;
+            margin-top: 20px;
+            font-size: 0.85rem;
+            color: #888;
+            text-align: center;
+        }
+
+        .security-notice strong {
+            color: var(--accent-color);
+        }
+
+        @media (max-width: 480px) {
+            .login-card {
+                margin: 20px;
+                padding: 30px 20px;
+            }
+        }
+    </style>
+</head>
+
+<body>
+    <div class="login-container">
+        <div class="login-card">
+            <div class="login-logo">
+                <img src="static/eftsuitelogo.png" alt="EFTSuite">
+            </div>
+
+            <div id="error-message" class="error-message"></div>
+            <div id="success-message" class="success-message"></div>
+
+            <div class="tab-container">
+                <button class="tab-btn active" data-tab="login">Sign In</button>
+                <button class="tab-btn" data-tab="register" id="register-tab">Register</button>
+            </div>
+
+            <!-- Login Form -->
+            <div id="login-content" class="tab-content active">
+                <form id="login-form" class="login-form">
+                    <div class="form-group">
+                        <label for="login-username">Username</label>
+                        <input type="text" id="login-username" name="username" required
+                            autocomplete="username" placeholder="Enter your username">
+                    </div>
+
+                    <div class="form-group">
+                        <label for="login-password">Password</label>
+                        <input type="password" id="login-password" name="password" required
+                            autocomplete="current-password" placeholder="Enter your password">
+                    </div>
+
+                    <button type="submit" class="login-btn" id="login-btn">Sign In</button>
+                </form>
+            </div>
+
+            <!-- Register Form -->
+            <div id="register-content" class="tab-content">
+                <form id="register-form" class="login-form">
+                    <div class="form-group">
+                        <label for="register-username">Username</label>
+                        <input type="text" id="register-username" name="username" required
+                            autocomplete="username" placeholder="Choose a username" minlength="3" maxlength="50">
+                    </div>
+
+                    <div class="form-group">
+                        <label for="register-password">Password</label>
+                        <input type="password" id="register-password" name="password" required
+                            autocomplete="new-password" placeholder="Create a password" minlength="8">
+                        <div class="password-requirements">
+                            Password must contain:
+                            <ul>
+                                <li id="req-length">At least 8 characters</li>
+                                <li id="req-upper">Uppercase letter</li>
+                                <li id="req-lower">Lowercase letter</li>
+                                <li id="req-number">Number</li>
+                                <li id="req-special">Special character (!@#$%^&*)</li>
+                            </ul>
+                        </div>
+                    </div>
+
+                    <div class="form-group">
+                        <label for="register-confirm">Confirm Password</label>
+                        <input type="password" id="register-confirm" name="confirm" required
+                            autocomplete="new-password" placeholder="Confirm your password">
+                    </div>
+
+                    <button type="submit" class="login-btn" id="register-btn">Create Account</button>
+                </form>
+            </div>
+
+            <div class="security-notice">
+                <strong>Secure Processing</strong><br>
+                Your fingerprint data is encrypted and automatically deleted after your session ends.
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // Check if already authenticated
+        (async function checkAuth() {
+            try {
+                const response = await fetch('/api/auth/me');
+                if (response.ok) {
+                    window.location.href = '/';
+                }
+            } catch (e) {
+                // Not authenticated, stay on login page
+            }
+        })();
+
+        // Tab switching
+        document.querySelectorAll('.tab-btn').forEach(btn => {
+            btn.addEventListener('click', () => {
+                const tab = btn.dataset.tab;
+
+                // Update buttons
+                document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+                btn.classList.add('active');
+
+                // Update content
+                document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
+                document.getElementById(`${tab}-content`).classList.add('active');
+
+                // Clear messages
+                hideMessages();
+            });
+        });
+
+        // Password validation
+        const passwordInput = document.getElementById('register-password');
+        passwordInput.addEventListener('input', validatePassword);
+
+        function validatePassword() {
+            const password = passwordInput.value;
+
+            const requirements = {
+                'req-length': password.length >= 8,
+                'req-upper': /[A-Z]/.test(password),
+                'req-lower': /[a-z]/.test(password),
+                'req-number': /[0-9]/.test(password),
+                'req-special': /[!@#$%^&*()_+\-=\[\]{}|;:,.<>?]/.test(password)
+            };
+
+            for (const [id, valid] of Object.entries(requirements)) {
+                const el = document.getElementById(id);
+                if (valid) {
+                    el.classList.add('valid');
+                } else {
+                    el.classList.remove('valid');
+                }
+            }
+
+            return Object.values(requirements).every(v => v);
+        }
+
+        function showError(message) {
+            const el = document.getElementById('error-message');
+            el.textContent = message;
+            el.style.display = 'block';
+            document.getElementById('success-message').style.display = 'none';
+        }
+
+        function showSuccess(message) {
+            const el = document.getElementById('success-message');
+            el.textContent = message;
+            el.style.display = 'block';
+            document.getElementById('error-message').style.display = 'none';
+        }
+
+        function hideMessages() {
+            document.getElementById('error-message').style.display = 'none';
+            document.getElementById('success-message').style.display = 'none';
+        }
+
+        // Login form submission
+        document.getElementById('login-form').addEventListener('submit', async (e) => {
+            e.preventDefault();
+            hideMessages();
+
+            const btn = document.getElementById('login-btn');
+            btn.disabled = true;
+            btn.textContent = 'Signing in...';
+
+            const username = document.getElementById('login-username').value.trim();
+            const password = document.getElementById('login-password').value;
+
+            try {
+                const response = await fetch('/api/auth/login', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({ username, password })
+                });
+
+                const data = await response.json();
+
+                if (response.ok) {
+                    showSuccess('Login successful! Redirecting...');
+                    setTimeout(() => {
+                        window.location.href = '/';
+                    }, 500);
+                } else {
+                    showError(data.detail || 'Login failed');
+                    btn.disabled = false;
+                    btn.textContent = 'Sign In';
+                }
+            } catch (error) {
+                showError('Network error. Please try again.');
+                btn.disabled = false;
+                btn.textContent = 'Sign In';
+            }
+        });
+
+        // Register form submission
+        document.getElementById('register-form').addEventListener('submit', async (e) => {
+            e.preventDefault();
+            hideMessages();
+
+            const username = document.getElementById('register-username').value.trim();
+            const password = document.getElementById('register-password').value;
+            const confirm = document.getElementById('register-confirm').value;
+
+            // Validate password
+            if (!validatePassword()) {
+                showError('Password does not meet requirements');
+                return;
+            }
+
+            // Check passwords match
+            if (password !== confirm) {
+                showError('Passwords do not match');
+                return;
+            }
+
+            const btn = document.getElementById('register-btn');
+            btn.disabled = true;
+            btn.textContent = 'Creating account...';
+
+            try {
+                const response = await fetch('/api/auth/register', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({ username, password })
+                });
+
+                const data = await response.json();
+
+                if (response.ok) {
+                    showSuccess('Account created! You can now sign in.');
+
+                    // Switch to login tab
+                    document.querySelector('[data-tab="login"]').click();
+
+                    // Pre-fill username
+                    document.getElementById('login-username').value = username;
+                    document.getElementById('login-password').focus();
+
+                    // Clear register form
+                    document.getElementById('register-form').reset();
+                } else {
+                    showError(data.detail || 'Registration failed');
+                }
+            } catch (error) {
+                showError('Network error. Please try again.');
+            }
+
+            btn.disabled = false;
+            btn.textContent = 'Create Account';
+        });
+
+        // Check if registration is enabled
+        async function checkRegistrationEnabled() {
+            try {
+                const response = await fetch('/health');
+                const data = await response.json();
+
+                // If auth is not required, redirect to main page
+                if (!data.auth_required) {
+                    window.location.href = '/';
+                    return;
+                }
+
+                // Test if registration works
+                // We'll just show the tab - registration errors will be handled on submit
+            } catch (e) {
+                console.error('Health check failed:', e);
+            }
+        }
+
+        checkRegistrationEnabled();
+    </script>
+</body>
+
+</html>

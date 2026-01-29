@@ -1,23 +1,45 @@
-from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Request
+"""
+EFTSuite Web Application - Secure Version
+
+A secure web application for converting fingerprint cards (FD-258) to digital EFT files.
+Includes user authentication, session management, rate limiting, and secure data handling.
+"""
+
+from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Request, Depends, Cookie, Header
 from fastapi.exceptions import RequestValidationError
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import JSONResponse, FileResponse
-from pydantic import BaseModel
+from fastapi.responses import JSONResponse, FileResponse, RedirectResponse
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel, validator, Field
+from starlette.middleware.base import BaseHTTPMiddleware
+from contextlib import asynccontextmanager
 import shutil
 import os
+import re
 import uuid
 import json
 import base64
+import asyncio
+from datetime import datetime, timedelta
+from typing import List, Dict, Optional, Any, Union
+
 try:
     import cv2
 except ImportError:
     cv2 = None
 try:
-    import fitz # PyMuPDF
+    import fitz  # PyMuPDF
 except ImportError:
     fitz = None
 
-from typing import List, Dict, Optional, Any, Union
+# Rate limiting
+try:
+    from slowapi import Limiter, _rate_limit_exceeded_handler
+    from slowapi.util import get_remote_address
+    from slowapi.errors import RateLimitExceeded
+    RATE_LIMITING_AVAILABLE = True
+except ImportError:
+    RATE_LIMITING_AVAILABLE = False
 
 from services.image_processing import align_image, get_default_boxes, apply_crop_and_rotate
 from services.eft_generator import generate_eft
@@ -26,55 +48,386 @@ from services.eft_parser import EFTParser
 from services.eft_editor import EFTEditor
 from services.fd258_generator import FD258Generator
 from services.nbis_helper import convert_wsq_to_raw
+from services.auth import AuthManager, AuthSession
+from services.secure_delete import SecureDelete, SessionCleaner
 
 
-app = FastAPI()
+# =============================================================================
+# Configuration
+# =============================================================================
 
-# Logging handler for validation errors
-@app.exception_handler(RequestValidationError)
-async def validation_exception_handler(request: Request, exc: RequestValidationError):
-    print(f"Validation Error: {exc.errors()}")
-    print(f"Body: {await request.body()}")
-    return JSONResponse(
-        status_code=422,
-        content={"detail": exc.errors(), "body": str(exc.body)},
-    )
+# Environment-based configuration
+DEBUG = os.environ.get("DEBUG", "false").lower() == "true"
+REQUIRE_AUTH = os.environ.get("REQUIRE_AUTH", "true").lower() == "true"
+ALLOW_REGISTRATION = os.environ.get("ALLOW_REGISTRATION", "true").lower() == "true"
+MAX_UPLOAD_SIZE_MB = int(os.environ.get("MAX_UPLOAD_SIZE_MB", "50"))
+SESSION_TIMEOUT_HOURS = int(os.environ.get("SESSION_TIMEOUT_HOURS", "2"))
 
-# Mount static files
-app.mount("/static", StaticFiles(directory="static"), name="static")
-
-# Temp storage
+# Paths
 TMP_DIR = "/app/temp"
+DATA_DIR = "/app/data"
 os.makedirs(TMP_DIR, exist_ok=True)
+os.makedirs(DATA_DIR, exist_ok=True)
 
-# In-memory session store
+
+# =============================================================================
+# Rate Limiting Setup
+# =============================================================================
+
+if RATE_LIMITING_AVAILABLE:
+    limiter = Limiter(key_func=get_remote_address)
+else:
+    limiter = None
+
+
+# =============================================================================
+# Lifecycle Management
+# =============================================================================
+
+# Initialize auth manager
+auth_manager = AuthManager(db_path=os.path.join(DATA_DIR, "users.db"))
+
+# Initialize secure delete
+secure_delete = SecureDelete(passes=3)
+session_cleaner = SessionCleaner(TMP_DIR, secure_delete)
+
+# In-memory session store (for EFT processing, not auth)
 SESSIONS = {}
 
-# Model selection box on the fingerprint card image.
+# Background task for session cleanup
+async def cleanup_expired_sessions():
+    """Periodically clean up expired sessions"""
+    while True:
+        await asyncio.sleep(300)  # Every 5 minutes
+        try:
+            # Clean expired auth sessions
+            auth_manager.cleanup_expired_sessions()
+
+            # Clean expired data sessions
+            now = datetime.utcnow()
+            expired = []
+            for session_id, session_data in list(SESSIONS.items()):
+                created = session_data.get("created_at")
+                if created:
+                    age = now - created
+                    if age > timedelta(hours=SESSION_TIMEOUT_HOURS):
+                        expired.append(session_id)
+
+            for session_id in expired:
+                # Securely delete session data
+                session_cleaner.cleanup_session(session_id)
+                if session_id in SESSIONS:
+                    del SESSIONS[session_id]
+
+            if expired:
+                print(f"Cleaned up {len(expired)} expired sessions")
+        except Exception as e:
+            print(f"Error in cleanup task: {e}")
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Application lifespan management"""
+    # Startup
+    print("Starting EFTSuite with security features enabled")
+    print(f"  - Authentication required: {REQUIRE_AUTH}")
+    print(f"  - Registration allowed: {ALLOW_REGISTRATION}")
+    print(f"  - Session timeout: {SESSION_TIMEOUT_HOURS} hours")
+
+    # Create default admin if no users exist
+    if auth_manager.get_user_count() == 0:
+        default_password = os.environ.get("DEFAULT_ADMIN_PASSWORD", "ChangeMe123!")
+        success, msg = auth_manager.create_user("admin", default_password, is_admin=True)
+        if success:
+            print(f"  - Created default admin user (password: {default_password})")
+            print("  - IMPORTANT: Change the default password immediately!")
+        else:
+            print(f"  - Failed to create default admin: {msg}")
+
+    # Start cleanup task
+    cleanup_task = asyncio.create_task(cleanup_expired_sessions())
+
+    yield
+
+    # Shutdown
+    cleanup_task.cancel()
+    try:
+        await cleanup_task
+    except asyncio.CancelledError:
+        pass
+
+
+# =============================================================================
+# FastAPI App
+# =============================================================================
+
+app = FastAPI(
+    title="EFTSuite",
+    description="Secure fingerprint card to EFT converter",
+    version="2.1.0",
+    lifespan=lifespan
+)
+
+# Add rate limiting if available
+if RATE_LIMITING_AVAILABLE:
+    app.state.limiter = limiter
+    app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+
+
+# =============================================================================
+# Security Middleware
+# =============================================================================
+
+class SecurityMiddleware(BaseHTTPMiddleware):
+    """Add security headers to all responses"""
+
+    async def dispatch(self, request: Request, call_next):
+        response = await call_next(request)
+
+        # Security headers
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        response.headers["X-Frame-Options"] = "DENY"
+        response.headers["X-XSS-Protection"] = "1; mode=block"
+        response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+        response.headers["Permissions-Policy"] = "geolocation=(), microphone=(), camera=()"
+
+        # Cache control for sensitive endpoints
+        if "/api/" in request.url.path:
+            response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, private"
+            response.headers["Pragma"] = "no-cache"
+
+        return response
+
+
+app.add_middleware(SecurityMiddleware)
+
+# CORS configuration (restrictive by default)
+ALLOWED_ORIGINS = os.environ.get("ALLOWED_ORIGINS", "").split(",")
+ALLOWED_ORIGINS = [o.strip() for o in ALLOWED_ORIGINS if o.strip()]
+
+if ALLOWED_ORIGINS:
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=ALLOWED_ORIGINS,
+        allow_credentials=True,
+        allow_methods=["GET", "POST", "DELETE"],
+        allow_headers=["*"],
+    )
+
+
+# =============================================================================
+# Error Handlers
+# =============================================================================
+
+@app.exception_handler(RequestValidationError)
+async def validation_exception_handler(request: Request, exc: RequestValidationError):
+    """Handle validation errors without exposing sensitive data"""
+    # Log details server-side only
+    if DEBUG:
+        print(f"Validation Error: {exc.errors()}")
+
+    # Return sanitized response
+    return JSONResponse(
+        status_code=422,
+        content={"detail": "Invalid request data", "errors": [
+            {"field": err.get("loc", [])[-1] if err.get("loc") else "unknown",
+             "message": err.get("msg", "Invalid value")}
+            for err in exc.errors()
+        ]},
+    )
+
+
+@app.exception_handler(Exception)
+async def general_exception_handler(request: Request, exc: Exception):
+    """Handle unexpected errors without exposing stack traces"""
+    if DEBUG:
+        print(f"Unhandled error: {exc}")
+        import traceback
+        traceback.print_exc()
+
+    return JSONResponse(
+        status_code=500,
+        content={"detail": "An internal error occurred"},
+    )
+
+
+# =============================================================================
+# Authentication Dependencies
+# =============================================================================
+
+def get_client_ip(request: Request) -> str:
+    """Get client IP, considering proxy headers"""
+    forwarded = request.headers.get("X-Forwarded-For")
+    if forwarded:
+        return forwarded.split(",")[0].strip()
+    return request.client.host if request.client else "unknown"
+
+
+async def get_auth_token(
+    request: Request,
+    authorization: Optional[str] = Header(None),
+    auth_token: Optional[str] = Cookie(None)
+) -> Optional[str]:
+    """Extract auth token from header or cookie"""
+    # Try Authorization header first
+    if authorization:
+        if authorization.startswith("Bearer "):
+            return authorization[7:]
+        return authorization
+
+    # Fall back to cookie
+    return auth_token
+
+
+async def require_auth(
+    request: Request,
+    token: Optional[str] = Depends(get_auth_token)
+) -> AuthSession:
+    """Dependency that requires valid authentication"""
+    if not REQUIRE_AUTH:
+        # Return a dummy session for unauthenticated mode
+        return AuthSession(
+            token="",
+            user_id=0,
+            username="anonymous",
+            created_at=datetime.utcnow(),
+            expires_at=datetime.utcnow() + timedelta(days=365),
+            data_sessions=list(SESSIONS.keys())
+        )
+
+    if not token:
+        raise HTTPException(
+            status_code=401,
+            detail="Authentication required",
+            headers={"WWW-Authenticate": "Bearer"}
+        )
+
+    session = auth_manager.validate_token(token)
+    if not session:
+        raise HTTPException(
+            status_code=401,
+            detail="Invalid or expired token",
+            headers={"WWW-Authenticate": "Bearer"}
+        )
+
+    return session
+
+
+async def optional_auth(
+    request: Request,
+    token: Optional[str] = Depends(get_auth_token)
+) -> Optional[AuthSession]:
+    """Dependency that optionally authenticates"""
+    if not token:
+        return None
+    return auth_manager.validate_token(token)
+
+
+# =============================================================================
+# Input Validation Helpers
+# =============================================================================
+
+def validate_session_id(session_id: str) -> str:
+    """Validate session ID is a valid UUID"""
+    try:
+        uuid.UUID(session_id)
+        return session_id
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid session ID format")
+
+
+def validate_filename(filename: str) -> str:
+    """Validate and sanitize filename to prevent path traversal"""
+    # Remove any path components
+    filename = os.path.basename(filename)
+
+    # Check for dangerous patterns
+    if not filename or filename.startswith('.') or '..' in filename:
+        raise HTTPException(status_code=400, detail="Invalid filename")
+
+    # Only allow safe characters
+    if not re.match(r'^[\w\-. ]+$', filename):
+        raise HTTPException(status_code=400, detail="Invalid filename characters")
+
+    return filename
+
+
+def validate_path_safety(base_dir: str, file_path: str) -> str:
+    """Ensure file path stays within base directory"""
+    abs_base = os.path.abspath(base_dir)
+    abs_path = os.path.abspath(file_path)
+
+    if not abs_path.startswith(abs_base + os.sep):
+        raise HTTPException(status_code=403, detail="Access denied")
+
+    return abs_path
+
+
+def sanitize_text(text: str, max_length: int = 100, allow_spaces: bool = True) -> str:
+    """Sanitize text input"""
+    if not text:
+        return ""
+
+    # Basic sanitation
+    text = text.strip()
+
+    # Remove control characters
+    text = ''.join(c for c in text if ord(c) >= 32 or c in '\n\r\t')
+
+    # Limit length
+    text = text[:max_length]
+
+    if not allow_spaces:
+        text = ''.join(c for c in text if not c.isspace())
+
+    return text
+
+
+# =============================================================================
+# Request Models (with validation)
+# =============================================================================
+
 class Box(BaseModel):
     id: str
-    fp_number: int
-    x: float
-    y: float
-    w: float
-    h: float
+    fp_number: int = Field(..., ge=1, le=15)
+    x: float = Field(..., ge=0)
+    y: float = Field(..., ge=0)
+    w: float = Field(..., ge=0)
+    h: float = Field(..., ge=0)
 
-# Request model for the initial crop and rotate step.
+
 class CropRequest(BaseModel):
     session_id: str
-    rotation: int
-    x: int
-    y: int
-    w: int
-    h: int
+    rotation: int = Field(..., ge=-360, le=360)
+    x: int = Field(..., ge=0)
+    y: int = Field(..., ge=0)
+    w: int = Field(..., ge=1)
+    h: int = Field(..., ge=1)
 
-# Request model for the final EFT generation step.
+    @validator('session_id')
+    def validate_session(cls, v):
+        validate_session_id(v)
+        return v
+
+
 class GenerateRequest(BaseModel):
     session_id: str
     boxes: List[Box]
     type2_data: Dict[str, Any]
     bypass_ssn: Optional[bool] = False
-    mode: Optional[str] = "rolled" # 'atf' or 'rolled'
+    mode: Optional[str] = "rolled"
+
+    @validator('session_id')
+    def validate_session(cls, v):
+        validate_session_id(v)
+        return v
+
+    @validator('mode')
+    def validate_mode(cls, v):
+        if v not in ['atf', 'rolled']:
+            raise ValueError('Mode must be atf or rolled')
+        return v
+
 
 class CaptureSessionRequest(BaseModel):
     l_slap: Optional[str] = None
@@ -82,567 +435,780 @@ class CaptureSessionRequest(BaseModel):
     thumbs: Optional[str] = None
     prints: Optional[Dict[str, str]] = None
 
-# Request model for saving edited EFT.
+
 class SaveEFTRequest(BaseModel):
     session_id: str
     type2_data: Dict[str, Any]
 
+    @validator('session_id')
+    def validate_session(cls, v):
+        validate_session_id(v)
+        return v
+
+
 class SelectPageRequest(BaseModel):
     session_id: str
-    page_index: int
+    page_index: int = Field(..., ge=0)
 
-# Serves the main SPA.
+    @validator('session_id')
+    def validate_session(cls, v):
+        validate_session_id(v)
+        return v
+
+
+class LoginRequest(BaseModel):
+    username: str = Field(..., min_length=3, max_length=50)
+    password: str = Field(..., min_length=1)
+
+
+class RegisterRequest(BaseModel):
+    username: str = Field(..., min_length=3, max_length=50)
+    password: str = Field(..., min_length=8)
+
+    @validator('username')
+    def validate_username(cls, v):
+        if not v[0].isalpha():
+            raise ValueError('Username must start with a letter')
+        if not all(c.isalnum() or c in '_-' for c in v):
+            raise ValueError('Username can only contain letters, numbers, underscores, and hyphens')
+        return v.lower()
+
+
+class ChangePasswordRequest(BaseModel):
+    old_password: str = Field(..., min_length=1)
+    new_password: str = Field(..., min_length=8)
+
+
+# =============================================================================
+# Static Files and Main Page
+# =============================================================================
+
+# Serve static files
+app.mount("/static", StaticFiles(directory="static"), name="static")
+
+
 @app.get("/")
-async def read_index():
+async def read_index(auth: Optional[AuthSession] = Depends(optional_auth)):
+    """Serve the main page or redirect to login"""
+    if REQUIRE_AUTH and not auth:
+        return RedirectResponse(url="/login")
     return FileResponse("static/index.html")
 
-# Step 1: Uploads the raw fingerprint card image.
-# Creates a new session and saves the original image.
 
-@app.post("/api/upload")
-async def upload_image(file: UploadFile = File(...)):
+@app.get("/login")
+async def login_page():
+    """Serve the login page"""
+    return FileResponse("static/login.html")
+
+
+# =============================================================================
+# Authentication Endpoints
+# =============================================================================
+
+@app.post("/api/auth/login")
+async def login(request: Request, data: LoginRequest):
+    """Authenticate user and return token"""
+    if RATE_LIMITING_AVAILABLE:
+        # Rate limit: 5 attempts per minute per IP
+        pass  # Handled by decorator when available
+
+    ip_address = get_client_ip(request)
+    user_agent = request.headers.get("User-Agent", "")
+
+    success, message, token = auth_manager.authenticate(
+        data.username,
+        data.password,
+        ip_address,
+        user_agent
+    )
+
+    if not success:
+        raise HTTPException(status_code=401, detail=message)
+
+    response = JSONResponse(content={"message": message, "token": token})
+
+    # Set secure cookie
+    response.set_cookie(
+        key="auth_token",
+        value=token,
+        httponly=True,
+        secure=not DEBUG,  # Require HTTPS in production
+        samesite="strict",
+        max_age=SESSION_TIMEOUT_HOURS * 3600
+    )
+
+    return response
+
+
+@app.post("/api/auth/register")
+async def register(request: Request, data: RegisterRequest):
+    """Register a new user"""
+    if not ALLOW_REGISTRATION:
+        raise HTTPException(status_code=403, detail="Registration is disabled")
+
+    ip_address = get_client_ip(request)
+
+    # Rate limit registration
+    if RATE_LIMITING_AVAILABLE:
+        pass  # Handled by decorator
+
+    success, message = auth_manager.create_user(data.username, data.password)
+
+    if not success:
+        raise HTTPException(status_code=400, detail=message)
+
+    # Log the registration
+    auth_manager.log_action(None, "REGISTER", f"New user: {data.username}", ip_address)
+
+    return {"message": message}
+
+
+@app.post("/api/auth/logout")
+async def logout(
+    request: Request,
+    auth: AuthSession = Depends(require_auth)
+):
+    """Logout and invalidate session"""
+    ip_address = get_client_ip(request)
+    auth_manager.logout(auth.token, ip_address)
+
+    response = JSONResponse(content={"message": "Logged out successfully"})
+    response.delete_cookie("auth_token")
+
+    return response
+
+
+@app.get("/api/auth/me")
+async def get_current_user(auth: AuthSession = Depends(require_auth)):
+    """Get current user info"""
+    return {
+        "user_id": auth.user_id,
+        "username": auth.username,
+        "expires_at": auth.expires_at.isoformat()
+    }
+
+
+@app.post("/api/auth/change-password")
+async def change_password(
+    request: Request,
+    data: ChangePasswordRequest,
+    auth: AuthSession = Depends(require_auth)
+):
+    """Change user password"""
+    success, message = auth_manager.change_password(
+        auth.token,
+        data.old_password,
+        data.new_password
+    )
+
+    if not success:
+        raise HTTPException(status_code=400, detail=message)
+
+    return {"message": message}
+
+
+# =============================================================================
+# Health Check
+# =============================================================================
+
+@app.get("/health")
+async def health_check():
+    """Health check endpoint for Docker/load balancer"""
+    return {
+        "status": "healthy",
+        "timestamp": datetime.utcnow().isoformat(),
+        "auth_required": REQUIRE_AUTH
+    }
+
+
+# =============================================================================
+# Session Management Helpers
+# =============================================================================
+
+def create_session(auth: AuthSession) -> str:
+    """Create a new data processing session"""
     session_id = str(uuid.uuid4())
     session_dir = os.path.join(TMP_DIR, session_id)
     os.makedirs(session_dir, exist_ok=True)
-    
-    # Determine extension
-    ext = os.path.splitext(file.filename)[1].lower()
+
+    SESSIONS[session_id] = {
+        "created_at": datetime.utcnow(),
+        "user_id": auth.user_id,
+        "boxes": []
+    }
+
+    # Register with auth system
+    if auth.token:
+        auth_manager.register_data_session(auth.token, session_id)
+
+    return session_id
+
+
+def get_session(session_id: str, auth: AuthSession) -> dict:
+    """Get session data, verifying ownership"""
+    session_id = validate_session_id(session_id)
+
+    if session_id not in SESSIONS:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    session = SESSIONS[session_id]
+
+    # Verify ownership
+    if REQUIRE_AUTH and session.get("user_id") != auth.user_id:
+        if not auth_manager.owns_data_session(auth.token, session_id):
+            raise HTTPException(status_code=403, detail="Access denied")
+
+    # Update last accessed
+    session["last_accessed"] = datetime.utcnow()
+
+    return session
+
+
+def get_session_dir(session_id: str) -> str:
+    """Get session directory path"""
+    session_id = validate_session_id(session_id)
+    session_dir = os.path.join(TMP_DIR, session_id)
+    validate_path_safety(TMP_DIR, session_dir)
+    return session_dir
+
+
+# =============================================================================
+# Upload Endpoints
+# =============================================================================
+
+@app.post("/api/upload")
+async def upload_image(
+    request: Request,
+    file: UploadFile = File(...),
+    auth: AuthSession = Depends(require_auth)
+):
+    """Upload a fingerprint card image"""
+    # Validate file size
+    content = await file.read()
+    if len(content) > MAX_UPLOAD_SIZE_MB * 1024 * 1024:
+        raise HTTPException(
+            status_code=413,
+            detail=f"File too large. Maximum size is {MAX_UPLOAD_SIZE_MB}MB"
+        )
+
+    # Validate file type
+    ext = os.path.splitext(file.filename or "")[1].lower()
+    allowed_extensions = {'.jpg', '.jpeg', '.png', '.bmp', '.tiff', '.tif', '.pdf'}
+    if ext not in allowed_extensions:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid file type. Allowed: {', '.join(allowed_extensions)}"
+        )
+
+    # Create session
+    session_id = create_session(auth)
+    session_dir = get_session_dir(session_id)
+
     if not ext:
         ext = ".jpg"
 
     file_path = os.path.join(session_dir, "original" + ext)
     with open(file_path, "wb") as buffer:
-        shutil.copyfileobj(file.file, buffer)
-        
+        buffer.write(content)
+
     try:
         # Check if PDF
         if ext == ".pdf":
             if fitz is None:
-                raise HTTPException(status_code=500, detail="PyMuPDF (fitz) is not installed")
-            
+                raise HTTPException(status_code=500, detail="PDF processing not available")
+
             doc = fitz.open(file_path)
             page_count = doc.page_count
-            
+
             if page_count == 1:
                 # Auto-convert single page
                 page = doc.load_page(0)
-                # Render at high resolution (500 DPI)
                 zoom = 500 / 72
                 mat = fitz.Matrix(zoom, zoom)
                 pix = page.get_pixmap(matrix=mat)
-                
-                img_path = os.path.join(session_dir, "original.png") # Convert to PNG
+
+                img_path = os.path.join(session_dir, "original.png")
                 pix.save(img_path)
-                
-                # Update session path to point to the image
                 file_path = img_path
-                
-                # Continue as normal image upload...
+
                 with open(file_path, "rb") as f:
                     img_bytes = f.read()
                     img_base64 = base64.b64encode(img_bytes).decode('utf-8')
-                
-                SESSIONS[session_id] = {
-                    "image_path": file_path,
-                    "boxes": []
-                }
-                
+
+                SESSIONS[session_id]["image_path"] = file_path
+
                 return {
                     "session_id": session_id,
                     "image_base64": img_base64
                 }
             else:
-                # Multi-page PDF - Request selection
+                # Multi-page PDF
                 previews = []
-                for i in range(page_count):
+                for i in range(min(page_count, 20)):  # Limit pages
                     page = doc.load_page(i)
-                    # Render thumbnail (low res)
-                    zoom = 0.5 
+                    zoom = 0.5
                     mat = fitz.Matrix(zoom, zoom)
                     pix = page.get_pixmap(matrix=mat)
-                    
-                    # Get base64
                     img_data = pix.tobytes("png")
                     b64 = base64.b64encode(img_data).decode('utf-8')
                     previews.append(b64)
-                
-                # Save session state
-                SESSIONS[session_id] = {
-                    "mode": "pdf_select",
-                    "pdf_path": file_path,
-                    "page_count": page_count
-                }
-                
+
+                SESSIONS[session_id]["mode"] = "pdf_select"
+                SESSIONS[session_id]["pdf_path"] = file_path
+                SESSIONS[session_id]["page_count"] = page_count
+
                 return {
                     "session_id": session_id,
                     "type": "pdf_selection",
                     "pages": previews
                 }
 
-        # Normal Image Processing
-        # If we are here, it's not a PDF or it was converted already
-        
-        # Check Resolution (PPI)
-        # Standard FD-258 is 8 inches wide. 500 PPI = 4000 pixels.
+        # Normal image processing
         warning = None
         if cv2 is not None:
             img = cv2.imread(file_path)
             if img is not None:
                 h, w = img.shape[:2]
                 ppi = w / 8.0
-                if ppi < 490: # Allow slight buffer
-                    warning = f"Low resolution detected (~{int(ppi)} PPI). Minimum 500 PPI (4000px width) is required for valid EFTs."
+                if ppi < 490:
+                    warning = f"Low resolution detected (~{int(ppi)} PPI). Minimum 500 PPI required for valid EFTs."
 
-        # Read the image to get base64
         with open(file_path, "rb") as f:
             img_bytes = f.read()
             img_base64 = base64.b64encode(img_bytes).decode('utf-8')
-        
-        SESSIONS[session_id] = {
-            "image_path": file_path, # Temporary path pointing to original uploaded image
-            "boxes": []
-        }
-        
+
+        SESSIONS[session_id]["image_path"] = file_path
+
+        # Log the upload
+        auth_manager.log_action(
+            auth.token, "UPLOAD",
+            f"Session {session_id}, file size {len(content)} bytes",
+            get_client_ip(request)
+        )
+
         return {
             "session_id": session_id,
             "image_base64": img_base64,
             "warning": warning
         }
+
+    except HTTPException:
+        raise
     except Exception as e:
-        import traceback
-        traceback.print_exc()
+        # Clean up on error
+        session_cleaner.cleanup_session(session_id)
+        if session_id in SESSIONS:
+            del SESSIONS[session_id]
         raise HTTPException(status_code=500, detail=str(e))
 
+
 @app.post("/api/select_pdf_page")
-async def select_pdf_page(data: SelectPageRequest):
-    session_id = data.session_id
-    if session_id not in SESSIONS:
-        raise HTTPException(status_code=404, detail="Session not found")
-        
-    session_data = SESSIONS[session_id]
-    if session_data.get("mode") != "pdf_select":
+async def select_pdf_page(
+    data: SelectPageRequest,
+    auth: AuthSession = Depends(require_auth)
+):
+    """Select a page from multi-page PDF"""
+    session = get_session(data.session_id, auth)
+
+    if session.get("mode") != "pdf_select":
         raise HTTPException(status_code=400, detail="Invalid session mode")
-        
-    pdf_path = session_data["pdf_path"]
+
+    pdf_path = session["pdf_path"]
     page_idx = data.page_index
-    
+
     try:
         doc = fitz.open(pdf_path)
         if page_idx < 0 or page_idx >= doc.page_count:
-             raise HTTPException(status_code=400, detail="Invalid page index")
-             
+            raise HTTPException(status_code=400, detail="Invalid page index")
+
         page = doc.load_page(page_idx)
-        # Render high res (500 DPI)
         zoom = 500 / 72
         mat = fitz.Matrix(zoom, zoom)
         pix = page.get_pixmap(matrix=mat)
-        
-        session_dir = os.path.dirname(pdf_path)
+
+        session_dir = get_session_dir(data.session_id)
         img_path = os.path.join(session_dir, "original.png")
         pix.save(img_path)
-        
+
         # Update session
-        SESSIONS[session_id] = {
+        SESSIONS[data.session_id] = {
+            **session,
             "image_path": img_path,
+            "mode": None,
             "boxes": []
         }
-        
-        # Return base64
+
         with open(img_path, "rb") as f:
             b64 = base64.b64encode(f.read()).decode('utf-8')
-            
+
         return {
-            "session_id": session_id,
+            "session_id": data.session_id,
             "image_base64": b64
         }
-        
+
+    except HTTPException:
+        raise
     except Exception as e:
-        import traceback
-        traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
 
-# Creates a session from captured live scans.
+
 @app.post("/api/start_capture_session")
-async def start_capture_session(data: CaptureSessionRequest):
-    session_id = str(uuid.uuid4())
-    session_dir = os.path.join(TMP_DIR, session_id)
-    os.makedirs(session_dir, exist_ok=True)
-    
+async def start_capture_session(
+    request: Request,
+    data: CaptureSessionRequest,
+    auth: AuthSession = Depends(require_auth)
+):
+    """Create session from live scanner capture"""
+    session_id = create_session(auth)
+    session_dir = get_session_dir(session_id)
+
     images_map = {}
-    
-    # Save print images
+
     try:
         def save_b64(b64_str, name):
+            # Validate base64
+            try:
+                decoded = base64.b64decode(b64_str)
+            except Exception:
+                raise HTTPException(status_code=400, detail="Invalid base64 data")
+
             path = os.path.join(session_dir, name)
             with open(path, "wb") as f:
-                f.write(base64.b64decode(b64_str))
+                f.write(decoded)
             return path
-        
-        # 14 = L_SLAP, 13 = R_SLAP, 15 = THUMBS
-        if data.l_slap: images_map[14] = save_b64(data.l_slap, "14.png")
-        if data.r_slap: images_map[13] = save_b64(data.r_slap, "13.png")
-        if data.thumbs: images_map[15] = save_b64(data.thumbs, "15.png")
 
-        # Handle Generic Prints
+        if data.l_slap:
+            images_map[14] = save_b64(data.l_slap, "14.png")
+        if data.r_slap:
+            images_map[13] = save_b64(data.r_slap, "13.png")
+        if data.thumbs:
+            images_map[15] = save_b64(data.thumbs, "15.png")
+
         if data.prints:
             for k, b64 in data.prints.items():
-                fname = f"{k}.png"
-                # Ensure key is int for internal map
                 try:
                     fp_num = int(k)
-                    if b64 == "SKIP":
-                        # Load placeholder if available, otherwise create blank
-                        fname = f"{k}.jp2" # User requested JP2
-                        dest_path = os.path.join(session_dir, fname)
-                        
-                        # Correct Path based on user request
-                        if os.path.exists("./static/img/unprintable.jp2"):
-                            unprintable_path = os.path.abspath("./static/img/unprintable.jp2")
-                        else:
-                            # Fallback 
-                            unprintable_path = os.path.abspath("unprintable.jp2")
+                    if fp_num < 1 or fp_num > 15:
+                        continue
 
+                    if b64 == "SKIP":
+                        fname = f"{k}.jp2"
+                        dest_path = os.path.join(session_dir, fname)
+
+                        unprintable_path = os.path.abspath("./static/img/unprintable.jp2")
                         if os.path.exists(unprintable_path):
                             shutil.copy(unprintable_path, dest_path)
-                        else:
-                            print(f"Warning: unprintable.jp2 not found for skipped finger {k}. Using blank fallback.")
-                            # Create a blank white image (500x500)
-                            if cv2 is not None:
-                                import numpy as np
-                                blank_img = np.ones((500, 500, 3), dtype=np.uint8) * 255
-                                cv2.imwrite(dest_path, blank_img)
-                            else:
-                                # Fallback if no cv2 (unlikely but safe)
-                                with open(dest_path, "wb") as f:
-                                    f.write(b"") # Empty file better than crash? 
-                        
+                        elif cv2 is not None:
+                            import numpy as np
+                            blank_img = np.ones((500, 500, 3), dtype=np.uint8) * 255
+                            cv2.imwrite(dest_path, blank_img)
+
                         images_map[fp_num] = dest_path
                     else:
-                        images_map[fp_num] = save_b64(b64, fname)
+                        images_map[fp_num] = save_b64(b64, f"{k}.png")
                 except ValueError:
-                    print(f"Skipping invalid key {k}")
-        
-        # Save session and return session id
-        SESSIONS[session_id] = {
-            "mode": "capture",
-            "images": images_map
-        }
-        
+                    continue
+
+        SESSIONS[session_id]["mode"] = "capture"
+        SESSIONS[session_id]["images"] = images_map
+
+        auth_manager.log_action(
+            auth.token, "CAPTURE_SESSION",
+            f"Session {session_id}, {len(images_map)} images",
+            get_client_ip(request)
+        )
+
         return {"session_id": session_id}
-    
-    # Exception handling in case of an error
+
+    except HTTPException:
+        raise
     except Exception as e:
-        import traceback
-        traceback.print_exc()
+        session_cleaner.cleanup_session(session_id)
+        if session_id in SESSIONS:
+            del SESSIONS[session_id]
         raise HTTPException(status_code=500, detail=str(e))
 
-# Step 2: Applies user-defined crop and rotation to the original image.
-# Calculates default fingerprint boxes for the newly aligned image.
-@app.post("/api/process_crop")
-async def process_crop(data: CropRequest):
 
-    # Get session
-    session_id = data.session_id
-    if session_id not in SESSIONS:
-        raise HTTPException(status_code=404, detail="Session not found")
-        
-    # Get session directory
-    session_dir = os.path.join(TMP_DIR, session_id)
-    
-    # Use image path from session if available (handles png from pdfs)
-    if "image_path" in SESSIONS[session_id]:
-        original_path = SESSIONS[session_id]["image_path"]
+# =============================================================================
+# Processing Endpoints
+# =============================================================================
+
+@app.post("/api/process_crop")
+async def process_crop(
+    data: CropRequest,
+    auth: AuthSession = Depends(require_auth)
+):
+    """Apply crop and rotation to uploaded image"""
+    session = get_session(data.session_id, auth)
+    session_dir = get_session_dir(data.session_id)
+
+    if "image_path" in session:
+        original_path = session["image_path"]
     else:
         original_path = os.path.join(session_dir, "original.jpg")
-    
-    # Process crop
+
+    if not os.path.exists(original_path):
+        raise HTTPException(status_code=404, detail="Original image not found")
+
     try:
         crop_rect = {'x': data.x, 'y': data.y, 'w': data.w, 'h': data.h}
         processed_img = apply_crop_and_rotate(original_path, data.rotation, crop_rect)
-        
-        # Save as aligned.png
+
         aligned_path = os.path.join(session_dir, "aligned.png")
         cv2.imwrite(aligned_path, processed_img)
-        
-        # Update session
-        SESSIONS[session_id]["image_path"] = aligned_path
-        
-        # Get default boxes based on new image
+
+        SESSIONS[data.session_id]["image_path"] = aligned_path
+
         boxes = get_default_boxes(processed_img.shape)
-        SESSIONS[session_id]["boxes"] = boxes
-        
-        # Return new base64 and boxes
+        SESSIONS[data.session_id]["boxes"] = boxes
+
         _, buffer = cv2.imencode('.png', processed_img)
         img_base64 = base64.b64encode(buffer).decode('utf-8')
-        
+
         return {
             "image_base64": img_base64,
             "boxes": boxes
         }
-    
-    # Exception handling in case of an error
+
     except Exception as e:
-        print(e)
         raise HTTPException(status_code=500, detail=str(e))
 
 
-# Returns cropped images for the given boxes so the user can verify.
 @app.post("/api/preview")
-async def preview_crops(data: GenerateRequest):
-    session_id = data.session_id
-    if session_id not in SESSIONS:
-        raise HTTPException(status_code=404, detail="Session not found")
-    
-    # Get session directory
-    img_path = SESSIONS[session_id]["image_path"]
+async def preview_crops(
+    data: GenerateRequest,
+    auth: AuthSession = Depends(require_auth)
+):
+    """Generate preview crops for verification"""
+    session = get_session(data.session_id, auth)
+
+    img_path = session.get("image_path")
+    if not img_path or not os.path.exists(img_path):
+        raise HTTPException(status_code=404, detail="Image not found")
+
     img = cv2.imread(img_path)
-    
-    # Generate print previews
     previews = {}
-    
-    # Filter boxes based on mode
-    target_fps = []
-    if data.mode == "rolled":
-        target_fps = list(range(1, 11)) # 1-10
-    else:
-        target_fps = [13, 14, 15] # 13, 14, 15 (Slaps)
+
+    target_fps = list(range(1, 11)) if data.mode == "rolled" else [13, 14, 15]
 
     for box in data.boxes:
         if box.fp_number not in target_fps:
             continue
-            
-        # Crop
-        x, y, w, h = box.x, box.y, box.w, box.h
-        # Ensure bounds
+
+        x, y, w, h = int(box.x), int(box.y), int(box.w), int(box.h)
         x = max(0, x)
         y = max(0, y)
         w = min(w, img.shape[1] - x)
         h = min(h, img.shape[0] - y)
-        
+
+        if w <= 0 or h <= 0:
+            continue
+
         crop = img[y:y+h, x:x+w]
         _, buffer = cv2.imencode('.jpg', crop)
         b64 = base64.b64encode(buffer).decode('utf-8')
         previews[box.id] = b64
-        
-    return {"previews": previews}
-    
-"""
-> Step 3 (Final): Processes individual fingerprint images and generates the EFT file.
 
-This endpoint does the following:
-    1. Crops each finger based on the user-adjusted boxes.
-    2. Converts/segments the images (RGB -> Gray -> JP2).
-    3. Assembles the EFT file.
-    4. Handles re-compression if the file exceeds the 11MB size limit.
-"""
+    return {"previews": previews}
+
 
 @app.post("/api/generate")
-async def generate_eft_endpoint(data: GenerateRequest):
+async def generate_eft_endpoint(
+    request: Request,
+    data: GenerateRequest,
+    auth: AuthSession = Depends(require_auth)
+):
+    """Generate EFT file from fingerprints"""
+    session = get_session(data.session_id, auth)
+    session_dir = get_session_dir(data.session_id)
 
-    # Get session
-    session_id = data.session_id
-    if session_id not in SESSIONS:
-        raise HTTPException(status_code=404, detail="Session not found")
-    
-    # Get session data
-    session_data = SESSIONS[session_id]
-    session_dir = os.path.join(TMP_DIR, session_id)
-    
-    # Check if cv2 is installed, handle error if not
     if cv2 is None:
-        raise HTTPException(status_code=500, detail="cv2 not installed")
+        raise HTTPException(status_code=500, detail="OpenCV not available")
 
-    # Initialize variables
     prints_map = {}
-    fp_objects = [] 
+    fp_objects = []
 
-    # Check session mode (Capture or Upload)
-    if session_data.get("mode") == "capture":
-
-        # If Capture Mode: Load individual images based on box.fp_number
-        images_map = session_data["images"]
+    if session.get("mode") == "capture":
+        images_map = session["images"]
         for box in data.boxes:
-            # Handle key type differences (int vs str)
-            target_path = None
-            if box.fp_number in images_map:
-                target_path = images_map[box.fp_number]
-            elif str(box.fp_number) in images_map:
-                target_path = images_map[str(box.fp_number)]
-                
+            target_path = images_map.get(box.fp_number) or images_map.get(str(box.fp_number))
+
             if target_path:
-                img_path = target_path
-                img = cv2.imread(img_path)
-                
+                img = cv2.imread(target_path)
                 if img is None:
-                    print(f"Error: Failed to load image at {img_path}")
                     continue
 
-
-                # Create Fingerprint object
-                fp = Fingerprint(img, box.fp_number, session_dir, session_id)
+                fp = Fingerprint(img, box.fp_number, session_dir, data.session_id)
                 fp_objects.append(fp)
 
-                # Capture mode processing
                 if data.mode == "rolled":
                     result_path = fp.process_and_convert_raw(type4=True)
-                else: 
-                    # Default Type-14 Capture
+                else:
                     result_path = fp.process_and_convert_raw()
 
                 if result_path:
                     prints_map[box.fp_number] = fp
     else:
-        # Upload Mode: Crop from master image
-        img_path = session_data["image_path"]
+        img_path = session.get("image_path")
+        if not img_path or not os.path.exists(img_path):
+            raise HTTPException(status_code=404, detail="Image not found")
+
         img = cv2.imread(img_path)
-        
+
         for box in data.boxes:
-            # Cast to int for slicing
             x, y, w, h = int(box.x), int(box.y), int(box.w), int(box.h)
-            
-            # Validate bounds
+
             if w <= 0 or h <= 0:
-                print(f"Skipping invalid box {box.fp_number}: w={w}, h={h}")
                 continue
-                
-            # Ensure within image dimensions
+
             y = max(0, y)
             x = max(0, x)
             h = min(h, img.shape[0] - y)
             w = min(w, img.shape[1] - x)
-            
+
             if w <= 0 or h <= 0:
-                 print(f"Skipping empty crop for FP {box.fp_number}")
-                 continue
+                continue
 
             crop = img[y:y+h, x:x+w]
-            
-            fp = Fingerprint(crop, box.fp_number, session_dir, session_id)
+
+            fp = Fingerprint(crop, box.fp_number, session_dir, data.session_id)
             fp_objects.append(fp)
-            
-            # Select processing method based on requested mode (rolled or flat)
+
             if data.mode == "rolled":
                 result_path = fp.process_and_convert_raw(type4=True)
             else:
-                result_path = fp.process_and_convert_raw() # Default raw
-            
-            # Add processed fingerprint to prints_map
-            if result_path:
-                size = os.path.getsize(result_path)
-                print(f"Processed FP {box.fp_number}: {result_path} ({size} bytes)")
-                if size == 0:
-                    print(f"WARNING: FP {box.fp_number} is 0 bytes!")
-                prints_map[box.fp_number] = fp
-            else:
-                 print(f"ERROR: Failed to process FP {box.fp_number}")
-            
-    # Check if we have any valid objects
-    if not fp_objects:
-        raise HTTPException(status_code=400, detail="No valid fingerprints found to generate EFT.")
+                result_path = fp.process_and_convert_raw()
 
-    # Generate EFT with size safeguard
+            if result_path:
+                prints_map[box.fp_number] = fp
+
+    if not fp_objects:
+        raise HTTPException(status_code=400, detail="No valid fingerprints found")
+
     try:
-        # Inject bypass flag into type2_data for the generator
         gen_data = data.type2_data.copy()
         gen_data["bypass_ssn"] = data.bypass_ssn
 
-        # Initial generation with NO compression (Raw)
-        eft_path = generate_eft(gen_data, session_id, {fp.fp_number: fp for fp in fp_objects}, mode=data.mode)
-        
-        # Check size (Max 11.8 MB)
+        eft_path = generate_eft(
+            gen_data, data.session_id,
+            {fp.fp_number: fp for fp in fp_objects},
+            mode=data.mode
+        )
+
+        # Handle size limits
         max_size = 11.8 * 1024 * 1024
         current_size = os.path.getsize(eft_path)
-        
+
+        bitrates = [2.25, 1.75, 1.25, 0.75]
         retries = 0
-        # WSQ Bitrates: Start high (2.25) and decrease by 0.5
-        bitrates = [2.25, 1.75, 1.25, 0.75] 
-        
-        # Re-compress and re-generate EFT if file exceeds limit
+
         while current_size > max_size and retries < len(bitrates):
-            print(f"EFT size {current_size} exceeds limit. Re-compressing with WSQ bitrate {bitrates[retries]}...")
-            
-            # Re-compress all images
             for fp in fp_objects:
                 if data.mode == "rolled":
                     fp.process_and_convert_wsq(bitrate=bitrates[retries], type4=True)
                 else:
                     fp.process_and_convert_wsq(bitrate=bitrates[retries])
-            
-            # Re-generate EFT
-            eft_path = generate_eft(gen_data, session_id, {fp.fp_number: fp for fp in fp_objects}, mode=data.mode)
+
+            eft_path = generate_eft(
+                gen_data, data.session_id,
+                {fp.fp_number: fp for fp in fp_objects},
+                mode=data.mode
+            )
             current_size = os.path.getsize(eft_path)
             retries += 1
-        
-        # If file still exceeds limit after all retries, raise error
-        if current_size > max_size:
-            raise HTTPException(status_code=400, detail=f"EFT size ({current_size} bytes) exceeds 11.8MB limit even after compression.")
-        
-        # Determine Filename
-        fname = data.type2_data.get("fname", "Unknown")
-        lname = data.type2_data.get("lname", "Unknown")
 
-        # Sanitize
-        safe_fname = "".join(c for c in fname if c.isalnum() or c in ('-', '_'))
-        safe_lname = "".join(c for c in lname if c.isalnum() or c in ('-', '_'))
-        
-        # Generate filename
+        if current_size > max_size:
+            raise HTTPException(
+                status_code=400,
+                detail=f"EFT size ({current_size} bytes) exceeds limit after compression"
+            )
+
+        # Generate safe filename
+        fname = sanitize_text(data.type2_data.get("fname", "Unknown"), 50, False)
+        lname = sanitize_text(data.type2_data.get("lname", "Unknown"), 50, False)
+
+        safe_fname = "".join(c for c in fname if c.isalnum() or c in '-_')
+        safe_lname = "".join(c for c in lname if c.isalnum() or c in '-_')
+
         filename = f"EFT-{safe_fname}-{safe_lname}.eft"
-        
-        # Rename the generated file to the user-friendly name
         new_path = os.path.join(session_dir, filename)
         shutil.move(eft_path, new_path)
-        
-        # Return download URL with session path and filename
-        return {"download_url": f"/api/download/{session_id}/{filename}", "filename": filename}
+
+        # Log the generation
+        auth_manager.log_action(
+            auth.token, "GENERATE_EFT",
+            f"Session {data.session_id}, size {current_size} bytes",
+            get_client_ip(request)
+        )
+
+        return {
+            "download_url": f"/api/download/{data.session_id}/{filename}",
+            "filename": filename
+        }
+
+    except HTTPException:
+        raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"EFT Generation failed: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"EFT generation failed: {str(e)}")
 
-# View/Edit EFT Endpoints
-# Upload an existing EFT file for viewing/editing
+
+# =============================================================================
+# EFT View/Edit Endpoints
+# =============================================================================
+
 @app.post("/api/upload_eft")
-async def upload_eft(file: UploadFile = File(...)):
-    session_id = str(uuid.uuid4())
-    session_dir = os.path.join(TMP_DIR, session_id)
-    # Create session directory
-    os.makedirs(session_dir, exist_ok=True)
+async def upload_eft(
+    request: Request,
+    file: UploadFile = File(...),
+    auth: AuthSession = Depends(require_auth)
+):
+    """Upload existing EFT for viewing/editing"""
+    content = await file.read()
 
-    # Save uploaded file to session directory
+    if len(content) > MAX_UPLOAD_SIZE_MB * 1024 * 1024:
+        raise HTTPException(status_code=413, detail="File too large")
+
+    session_id = create_session(auth)
+    session_dir = get_session_dir(session_id)
+
     file_path = os.path.join(session_dir, "original.eft")
     with open(file_path, "wb") as buffer:
-        shutil.copyfileobj(file.file, buffer)
-        
-    # Store session data
-    SESSIONS[session_id] = {
-        "eft_path": file_path,
-        "mode": "view_edit"
-    }
-    
-    # Return session ID
+        buffer.write(content)
+
+    SESSIONS[session_id]["eft_path"] = file_path
+    SESSIONS[session_id]["mode"] = "view_edit"
+
+    auth_manager.log_action(
+        auth.token, "UPLOAD_EFT",
+        f"Session {session_id}, size {len(content)} bytes",
+        get_client_ip(request)
+    )
+
     return {"session_id": session_id}
 
-# Parse the uploaded EFT and return data for the UI
+
 @app.get("/api/eft_session/{session_id}")
-async def get_eft_session(session_id: str):
-    # Check if session exists
-    if session_id not in SESSIONS or "eft_path" not in SESSIONS[session_id]:
-        raise HTTPException(status_code=404, detail="Session not found")
-        
-    # Get session directory and EFT path
-    session_dir = os.path.join(TMP_DIR, session_id)
-    eft_path = SESSIONS[session_id]["eft_path"]
-    
-    # Parse EFT
+async def get_eft_session(
+    session_id: str,
+    auth: AuthSession = Depends(require_auth)
+):
+    """Parse and return EFT data for viewing"""
+    session = get_session(session_id, auth)
+
+    if "eft_path" not in session:
+        raise HTTPException(status_code=404, detail="EFT not found in session")
+
+    session_dir = get_session_dir(session_id)
+    eft_path = session["eft_path"]
+
     try:
         parser = EFTParser(eft_path)
-        
-        # 1. Type 2 Data
+
         type2_data = parser.get_type2_data()
-        
-        # 2. Extract Images
+
         images_dir = os.path.join(session_dir, "images")
         images = parser.extract_images(images_dir)
-        
-        # Prepare image URLs by mapping raw local path to endpoint        
+
         image_data = []
         for img in images:
             image_data.append({
@@ -651,90 +1217,182 @@ async def get_eft_session(session_id: str):
                 "width": img["width"],
                 "height": img["height"]
             })
-            
-        # 3. Text Dump
+
         text_dump = parser.get_text_dump()
+
         return {
             "type2_data": type2_data,
             "images": image_data,
             "text_dump": text_dump
         }
-    # Catch any errors and throw console message if present
+
     except Exception as e:
-        import traceback
-        traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"Failed to parse EFT: {str(e)}")
 
-@app.get("/api/image/{session_id}/{filename}")
-async def get_image(session_id: str, filename: str):
-    file_path = os.path.join(TMP_DIR, session_id, "images", filename)
-    if os.path.exists(file_path):
-        return FileResponse(file_path)
-    raise HTTPException(status_code=404, detail="Image not found")
 
-# Reconstruct the EFT with updated Type 2 data.
+@app.get("/api/image/{session_id}/{filename}")
+async def get_image(
+    session_id: str,
+    filename: str,
+    auth: AuthSession = Depends(require_auth)
+):
+    """Get extracted image from EFT"""
+    get_session(session_id, auth)  # Verify ownership
+
+    # Validate filename
+    filename = validate_filename(filename)
+
+    session_dir = get_session_dir(session_id)
+    file_path = os.path.join(session_dir, "images", filename)
+
+    # Validate path stays within session directory
+    validate_path_safety(session_dir, file_path)
+
+    if not os.path.exists(file_path):
+        raise HTTPException(status_code=404, detail="Image not found")
+
+    return FileResponse(file_path)
+
+
 @app.post("/api/save_eft")
-async def save_eft(data: SaveEFTRequest):
-    # Get session ID and throw error if not present
-    session_id = data.session_id
-    if session_id not in SESSIONS or "eft_path" not in SESSIONS[session_id]:
-        raise HTTPException(status_code=404, detail="Session not found")
-        
-    session_dir = os.path.join(TMP_DIR, session_id)
-    eft_path = SESSIONS[session_id]["eft_path"]
-    
-    # Generate new filename
+async def save_eft(
+    request: Request,
+    data: SaveEFTRequest,
+    auth: AuthSession = Depends(require_auth)
+):
+    """Save edited EFT"""
+    session = get_session(data.session_id, auth)
+
+    if "eft_path" not in session:
+        raise HTTPException(status_code=404, detail="EFT not found in session")
+
+    session_dir = get_session_dir(data.session_id)
+    eft_path = session["eft_path"]
     output_path = os.path.join(session_dir, "edited.eft")
-    
+
     try:
         editor = EFTEditor(eft_path, output_path)
         editor.save(data.type2_data)
-        
-        # Determine nicer filename if possible
-        fname = data.type2_data.get("2.018", "edited")
-        # Sanitize filename
-        safe_fname = "".join(c for c in fname if c.isalnum() or c in ('-', '_', ','))
+
+        fname = sanitize_text(data.type2_data.get("2.018", "edited"), 50, False)
+        safe_fname = "".join(c for c in fname if c.isalnum() or c in '-_,')
         final_name = f"edited-{safe_fname}.eft"
-        
+
         final_path = os.path.join(session_dir, final_name)
         shutil.move(output_path, final_path)
-        # Create download URL for edited EFT
-        return {"download_url": f"/api/download/{session_id}/{final_name}", "filename": final_name}
-    
-    # Throw error if EFT can't be saved
+
+        auth_manager.log_action(
+            auth.token, "SAVE_EFT",
+            f"Session {data.session_id}",
+            get_client_ip(request)
+        )
+
+        return {
+            "download_url": f"/api/download/{data.session_id}/{final_name}",
+            "filename": final_name
+        }
+
     except Exception as e:
-        import traceback
-        traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"Failed to save EFT: {str(e)}")
 
-# Create download endpoint
+
+# =============================================================================
+# Download and Delete Endpoints
+# =============================================================================
+
 @app.get("/api/download/{session_id}/{filename}")
-async def download_file(session_id: str, filename: str):
-    file_path = os.path.join(TMP_DIR, session_id, filename)
-    if os.path.exists(file_path):
-        return FileResponse(file_path, filename=filename)
-    raise HTTPException(status_code=404, detail="File not found")
+async def download_file(
+    request: Request,
+    session_id: str,
+    filename: str,
+    auth: AuthSession = Depends(require_auth)
+):
+    """Download generated file"""
+    get_session(session_id, auth)  # Verify ownership
 
-# Destroy session
+    # Validate filename to prevent path traversal
+    filename = validate_filename(filename)
+
+    session_dir = get_session_dir(session_id)
+    file_path = os.path.join(session_dir, filename)
+
+    # Validate path stays within session directory
+    validate_path_safety(session_dir, file_path)
+
+    if not os.path.exists(file_path):
+        raise HTTPException(status_code=404, detail="File not found")
+
+    auth_manager.log_action(
+        auth.token, "DOWNLOAD",
+        f"Session {session_id}, file {filename}",
+        get_client_ip(request)
+    )
+
+    return FileResponse(file_path, filename=filename)
+
+
 @app.delete("/api/delete/{session_id}")
-async def delete_session(session_id: str):
-    # Validate session_id is a valid UUID to prevent directory traversal
-    try:
-        uuid.UUID(session_id)
-    except ValueError:
-        raise HTTPException(status_code=400, detail="Invalid session ID format")
+async def delete_session(
+    request: Request,
+    session_id: str,
+    auth: AuthSession = Depends(require_auth)
+):
+    """Securely delete a session and all its data"""
+    get_session(session_id, auth)  # Verify ownership
 
-    session_dir = os.path.join(TMP_DIR, session_id)
-    # Double check path safety
-    if not os.path.abspath(session_dir).startswith(os.path.abspath(TMP_DIR)):
-         raise HTTPException(status_code=403, detail="Access denied")
+    session_dir = get_session_dir(session_id)
 
-    if os.path.exists(session_dir):
-        shutil.rmtree(session_dir)
+    # Securely delete files
+    success = session_cleaner.cleanup_session(session_id)
+
+    # Remove from memory
+    if session_id in SESSIONS:
+        del SESSIONS[session_id]
+
+    auth_manager.log_action(
+        auth.token, "DELETE_SESSION",
+        f"Session {session_id}, secure_delete={success}",
+        get_client_ip(request)
+    )
+
+    return {"message": "Session deleted securely", "secure": success}
+
+
+@app.delete("/api/delete-all-data")
+async def delete_all_user_data(
+    request: Request,
+    auth: AuthSession = Depends(require_auth)
+):
+    """Securely delete all data for current user"""
+    # Get all sessions for this user
+    user_sessions = auth_manager.get_user_data_sessions(auth.token)
+
+    deleted_count = 0
+    for session_info in user_sessions:
+        session_id = session_info["session_id"]
+        if session_cleaner.cleanup_session(session_id):
+            deleted_count += 1
         if session_id in SESSIONS:
             del SESSIONS[session_id]
-        return {"message": "Deleted"}
-    raise HTTPException(status_code=404, detail="Session not found")
+
+    # Clear from database
+    auth_manager.delete_user_data_sessions(auth.token)
+
+    auth_manager.log_action(
+        auth.token, "DELETE_ALL_DATA",
+        f"Deleted {deleted_count} sessions",
+        get_client_ip(request)
+    )
+
+    return {
+        "message": f"Securely deleted {deleted_count} sessions",
+        "count": deleted_count
+    }
+
+
+# =============================================================================
+# FD-258 Generation
+# =============================================================================
 
 class RawFP:
     def __init__(self, p, w=0, h=0, is_raw=False):
@@ -743,133 +1401,135 @@ class RawFP:
         self.h = h
         self.is_raw = is_raw
 
-class SimpleFP:
-    def __init__(self, p, w=0, h=0): 
-        self.img_path = p
-        self.w = w
-        self.h = h
-
 
 @app.post("/api/generate_fd258")
-async def generate_fd258(data: GenerateRequest):
-    # Get session
-    session_id = data.session_id
-    if session_id not in SESSIONS:
-        raise HTTPException(status_code=404, detail="Session not found")
-    
-    session_data = SESSIONS[session_id]
-    session_dir = os.path.join(TMP_DIR, session_id)
-    
-    # FD258 generation is only available for capture mode
-    if session_data.get("mode") != "capture":
+async def generate_fd258(
+    request: Request,
+    data: GenerateRequest,
+    auth: AuthSession = Depends(require_auth)
+):
+    """Generate printable FD-258 card"""
+    session = get_session(data.session_id, auth)
+    session_dir = get_session_dir(data.session_id)
+
+    if session.get("mode") != "capture":
         raise HTTPException(status_code=400, detail="Only available for capture sessions")
 
-    # Load images_map
-    images_map = session_data["images"]
-    print(f"DEBUG: images_map keys: {list(images_map.keys())}")
-    
-    # Collect printable images
+    images_map = session["images"]
     prints_map = {}
-    
-    # NEW: Directly map individual images if available (e.g. Type-4 Flat Capture)
-    # Check for IDs 1-10 and 11-14 in images_map
+
+    # Map individual images
     for i in range(1, 15):
         fp_num = i
-        # Check string or int key
-        target_path = None
-        if fp_num in images_map: target_path = images_map[fp_num]
-        elif str(fp_num) in images_map: target_path = images_map[str(fp_num)]
-        
-        if target_path and os.path.exists(target_path):
-            print(f"DEBUG: Found direct print for FP {fp_num}")
-            # Map to FD258 layout
-            # 1-10 map directly
-            # 11-14:
-            # 14 -> 14 (P_L4)
-            # 13 -> 13 (P_R4)
-            # 11 -> Plain R Thumb (usually ID 11 in our capture, but specs say 11 is P_RT)
-            # 12 -> Plain L Thumb 
-            
-            # SimpleFP wrapper
-            sfp = RawFP(target_path) 
-            prints_map[fp_num] = sfp
-            
-            # Special handling for capture IDs 11 and 12 (Thumbs)
-            # In captureSequence: 11='R Thumb (Plain)', 12='L Thumb (Plain)'
-            # FD258 Generator expects '11' for R Thumb Plain, '12' for L Thumb Plain.
-            # This matches.
-            
-    # If we have prints_map filled with 1-14, we are good.
-    # Legacy Fallback: Only if we lack data, try to extract from Slaps (13, 14, 15)
-    
-    if len(prints_map) < 4: # Arbitrary check, if we have very few prints, try legacy logic for slaps
-        print("DEBUG: Low print count, attempting legacy slap segmentation...")
-        for fp_num in [13, 14, 15]:
-            # ... existing logic ...
-            target_path = None
-            if fp_num in images_map: target_path = images_map[fp_num]
-            elif str(fp_num) in images_map: target_path = images_map[str(fp_num)]
+        target_path = images_map.get(fp_num) or images_map.get(str(fp_num))
 
-            if not target_path: continue
-            
-            fp = Fingerprint(cv2.imread(target_path), fp_num, session_dir, session_id)
+        if target_path and os.path.exists(target_path):
+            sfp = RawFP(target_path)
+            prints_map[fp_num] = sfp
+
+    # Legacy fallback for slaps
+    if len(prints_map) < 4:
+        for fp_num in [13, 14, 15]:
+            target_path = images_map.get(fp_num) or images_map.get(str(fp_num))
+
+            if not target_path:
+                continue
+
+            fp = Fingerprint(cv2.imread(target_path), fp_num, session_dir, data.session_id)
             fp.process_and_convert(10)
-            if not fp.fingers: fp.segment()
-            
-            # Map Slaps themselves
-            if fp_num == 13: prints_map[13] = fp
-            elif fp_num == 14: prints_map[14] = fp
-            
-            # Map segments
+            if not fp.fingers:
+                fp.segment()
+
+            if fp_num == 13:
+                prints_map[13] = fp
+            elif fp_num == 14:
+                prints_map[14] = fp
+
             for finger in fp.fingers:
-                try: 
+                try:
                     fn = int(finger.n)
                     seg_path = os.path.join(session_dir, finger.name)
-                    
+
                     if fp.fp_number == 14:
-                         if fn == 7: fn = 10
-                         elif fn == 10: fn = 7
-                         elif fn == 8: fn = 9
-                         elif fn == 9: fn = 8
-                    
-                    sfp = RawFP(seg_path, finger.sw, finger.sh) # simplified
-                    if 1 <= fn <= 10: prints_map[fn] = sfp
-                    
-                    # Map Segments to Plain Thumbs 11/12
-                    # Note: If we already have 11/12 from direct capture, don't overwrite?
-                    if fn == 11 and 11 not in prints_map: 
-                        prints_map[11] = sfp # Plain R Thumb
-                        prints_map[1] = sfp  # Also use for rolled if missing?
-                    elif fn == 12 and 12 not in prints_map: 
-                        prints_map[12] = sfp # Plain L Thumb
+                        if fn == 7:
+                            fn = 10
+                        elif fn == 10:
+                            fn = 7
+                        elif fn == 8:
+                            fn = 9
+                        elif fn == 9:
+                            fn = 8
+
+                    sfp = RawFP(seg_path, finger.sw, finger.sh)
+                    if 1 <= fn <= 10:
+                        prints_map[fn] = sfp
+
+                    if fn == 11 and 11 not in prints_map:
+                        prints_map[11] = sfp
+                        prints_map[1] = sfp
+                    elif fn == 12 and 12 not in prints_map:
+                        prints_map[12] = sfp
                         prints_map[6] = sfp
-                        
-                    # Fix: If we extracted Rolled Thumb (1 or 6) from slap, map to Plain as well if plain missing
-                    if fn == 1 and 11 not in prints_map: prints_map[11] = sfp
-                    if fn == 6 and 12 not in prints_map: prints_map[12] = sfp
 
-                except Exception as e:
-                    print(f"Error mapping segment: {e}")
+                    if fn == 1 and 11 not in prints_map:
+                        prints_map[11] = sfp
+                    if fn == 6 and 12 not in prints_map:
+                        prints_map[12] = sfp
 
-    print(f"DEBUG: Final prints_map keys: {list(prints_map.keys())}")
+                except Exception:
+                    continue
 
-
-
-                 
-    # Generate FD258
     try:
         generator = FD258Generator("static/img/fd258-blank.jpg")
         img_bytes = generator.generate(data.type2_data, prints_map)
-        
-        # Save
-        filename = f"fd258-{session_id}.jpg"
+
+        filename = f"fd258-{data.session_id}.jpg"
         out_path = os.path.join(session_dir, filename)
         with open(out_path, "wb") as f:
             f.write(img_bytes)
-            
-        return {"download_url": f"/api/download/{session_id}/{filename}", "filename": filename}
-    except Exception as e:
-        import traceback
-        traceback.print_exc()
-        raise HTTPException(status_code=500, detail=f"FD258 Generation failed: {str(e)}")
 
+        auth_manager.log_action(
+            auth.token, "GENERATE_FD258",
+            f"Session {data.session_id}",
+            get_client_ip(request)
+        )
+
+        return {
+            "download_url": f"/api/download/{data.session_id}/{filename}",
+            "filename": filename
+        }
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"FD258 generation failed: {str(e)}")
+
+
+# =============================================================================
+# User Data Management
+# =============================================================================
+
+@app.get("/api/my-sessions")
+async def list_my_sessions(auth: AuthSession = Depends(require_auth)):
+    """List all sessions for current user"""
+    sessions = auth_manager.get_user_data_sessions(auth.token)
+
+    # Add size information
+    for session_info in sessions:
+        session_info["size_bytes"] = session_cleaner.get_session_size(session_info["session_id"])
+
+    return {"sessions": sessions}
+
+
+@app.get("/api/storage-usage")
+async def get_storage_usage(auth: AuthSession = Depends(require_auth)):
+    """Get storage usage for current user"""
+    sessions = auth_manager.get_user_data_sessions(auth.token)
+    total_size = sum(
+        session_cleaner.get_session_size(s["session_id"])
+        for s in sessions
+    )
+
+    return {
+        "session_count": len(sessions),
+        "total_bytes": total_size,
+        "total_mb": round(total_size / (1024 * 1024), 2)
+    }

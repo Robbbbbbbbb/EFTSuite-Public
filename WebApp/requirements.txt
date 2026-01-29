@@ -7,3 +7,6 @@ imutils
 pillow
 jinja2
 pymupdf
+bcrypt
+pyjwt
+slowapi

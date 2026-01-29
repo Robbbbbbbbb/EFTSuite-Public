@@ -1,0 +1,67 @@
+version: '3.8'
+
+services:
+  # EFTSuite Application
+  eftsuite:
+    build:
+      context: ./WebApp
+      dockerfile: Dockerfile
+    container_name: eftsuite-app
+    restart: unless-stopped
+    environment:
+      # Authentication settings
+      - REQUIRE_AUTH=true
+      - ALLOW_REGISTRATION=true
+      - DEFAULT_ADMIN_PASSWORD=${ADMIN_PASSWORD:-ChangeMe123!}
+      - AUTH_SECRET_KEY=${AUTH_SECRET_KEY:-}
+
+      # Security settings
+      - DEBUG=false
+      - MAX_UPLOAD_SIZE_MB=50
+      - SESSION_TIMEOUT_HOURS=2
+
+      # CORS (set to your domain)
+      - ALLOWED_ORIGINS=${ALLOWED_ORIGINS:-}
+    volumes:
+      # Persistent data storage
+      - eftsuite-data:/app/data
+      # Temporary file storage (optional: use tmpfs for security)
+      - eftsuite-temp:/app/temp
+    networks:
+      - eftsuite-network
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8080/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+    # Don't expose directly - use nginx
+    expose:
+      - "8080"
+
+  # Nginx Reverse Proxy with HTTPS
+  nginx:
+    image: nginx:alpine
+    container_name: eftsuite-nginx
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./nginx/ssl:/etc/nginx/ssl:ro
+      - ./nginx/dhparam.pem:/etc/nginx/dhparam.pem:ro
+    depends_on:
+      - eftsuite
+    networks:
+      - eftsuite-network
+
+volumes:
+  eftsuite-data:
+    driver: local
+  eftsuite-temp:
+    driver: local
+
+networks:
+  eftsuite-network:
+    driver: bridge

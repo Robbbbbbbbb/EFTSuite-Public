@@ -1,0 +1,35 @@
+version: '3.8'
+
+# Development/Testing configuration - HTTP only, no nginx
+# For production, use docker-compose.yml with SSL certificates
+
+services:
+  eftsuite:
+    build:
+      context: ./WebApp
+      dockerfile: Dockerfile
+    container_name: eftsuite-dev
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    environment:
+      # Development settings
+      - DEBUG=true
+      - REQUIRE_AUTH=true
+      - ALLOW_REGISTRATION=true
+      - DEFAULT_ADMIN_PASSWORD=DevPassword123!
+      - MAX_UPLOAD_SIZE_MB=50
+      - SESSION_TIMEOUT_HOURS=4
+    volumes:
+      # Persistent data
+      - eftsuite-dev-data:/app/data
+      - eftsuite-dev-temp:/app/temp
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8080/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+volumes:
+  eftsuite-dev-data:
+  eftsuite-dev-temp:
