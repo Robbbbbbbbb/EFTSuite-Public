@@ -1,0 +1,99 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+  <title>EFT Suite — Scan Printed QR</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background: #111; color: #fff;
+      min-height: 100vh;
+      display: flex; flex-direction: column;
+      align-items: center; justify-content: center;
+      padding: 24px 16px; gap: 20px;
+    }
+    h1 { font-size: 1.25rem; font-weight: 600; text-align: center; }
+    p.sub { font-size: 0.85rem; color: #aaa; text-align: center; }
+    #scan-btn {
+      display: inline-block; padding: 18px 36px;
+      background: #2c6e49; color: #fff; border: none;
+      border-radius: 12px; font-size: 1.1rem; font-weight: 600;
+      cursor: pointer; text-align: center;
+    }
+    #scan-btn:active { background: #1e4d33; }
+    #status {
+      padding: 14px 20px; border-radius: 8px; text-align: center;
+      font-size: 0.95rem; max-width: 340px; width: 100%;
+      background: #1e1e1e; color: #bada55; min-height: 52px;
+      display: flex; align-items: center; justify-content: center;
+    }
+    #status.error   { color: #ff7070; }
+    #status.success { color: #55ff88; background: #0d2a16; }
+    #retry-btn {
+      display: none; padding: 12px 28px; background: #444;
+      color: #fff; border: none; border-radius: 8px; font-size: 1rem; cursor: pointer;
+    }
+    #file-input { display: none; }
+  </style>
+</head>
+<body>
+  <h1>Scan Printed QR Code</h1>
+  <p class="sub">Take a photo of the printed QR code — fill the frame with it</p>
+
+  <label id="scan-btn" for="file-input">📷 Open Camera</label>
+  <input id="file-input" type="file" accept="image/*" capture="environment">
+
+  <div id="status">Ready — tap Open Camera</div>
+  <button id="retry-btn" onclick="reset()">Try Again</button>
+
+  <script>
+    const fileInput = document.getElementById('file-input');
+    const statusEl  = document.getElementById('status');
+    const retryBtn  = document.getElementById('retry-btn');
+    const scanBtn   = document.getElementById('scan-btn');
+
+    function setStatus(msg, type) {
+      statusEl.textContent = msg;
+      statusEl.className = type || '';
+      if (type === 'error') retryBtn.style.display = 'inline-block';
+    }
+
+    function reset() {
+      fileInput.value = '';
+      retryBtn.style.display = 'none';
+      scanBtn.style.display = 'inline-block';
+      setStatus('Ready — tap Open Camera');
+    }
+
+    fileInput.addEventListener('change', async function() {
+      const file = this.files[0];
+      if (!file) return;
+      scanBtn.style.display = 'none';
+      setStatus('Decoding…');
+      const form = new FormData();
+      form.append('file', file);
+      try {
+        const res  = await fetch('/api/decode-qr', { method: 'POST', body: form });
+        const json = await res.json();
+        if (json.ok) {
+          setStatus('Sending to operator PC…');
+          const r2 = await fetch('/api/prefill-receive', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ raw: json.data })
+          });
+          const j2 = await r2.json();
+          if (j2.ok) setStatus('✓ Done! Form is being filled.', 'success');
+          else setStatus('Server error — try again.', 'error');
+        } else {
+          setStatus('No QR found — make sure the QR fills the frame, then try again.', 'error');
+        }
+      } catch (e) {
+        setStatus('Could not reach server — are you on the same WiFi?', 'error');
+      }
+    });
+  </script>
+</body>
+</html>

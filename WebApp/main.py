@@ -2,6 +2,8 @@ from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import JSONResponse, FileResponse
+from fastapi.middleware.cors import CORSMiddleware
+import socket
 from pydantic import BaseModel
 import shutil
 import os
@@ -29,6 +31,16 @@ from services.nbis_helper import convert_wsq_to_raw
 
 
 app = FastAPI()
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# In-memory store for prefill data from phone scans
+_PREFILL_QUEUE = {}
 
 # Logging handler for validation errors
 @app.exception_handler(RequestValidationError)
@@ -95,6 +107,107 @@ class SelectPageRequest(BaseModel):
 @app.get("/")
 async def read_index():
     return FileResponse("static/index.html")
+
+# Mobile phone QR scanner page
+@app.get("/scan")
+async def serve_scan():
+    return FileResponse("static/scan.html")
+
+# Returns server's LAN IP so the operator UI can display a phone-scan QR code
+@app.get("/api/local-ip")
+async def get_local_ip():
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(("8.8.8.8", 80))
+        ip = s.getsockname()[0]
+        s.close()
+    except Exception:
+        ip = "127.0.0.1"
+    return {"ip": ip, "port": 8080}
+
+# Phone posts decoded QR text here after scanning
+@app.post("/api/prefill-receive")
+async def prefill_receive(request: Request):
+    body = await request.json()
+    _PREFILL_QUEUE["latest"] = body.get("raw", "")
+    return {"ok": True}
+
+# Operator PC polls this — returns and clears pending prefill
+@app.get("/api/prefill-pending")
+async def prefill_pending():
+    data = _PREFILL_QUEUE.pop("latest", None)
+    return {"data": data}
+
+# Phone uploads QR image; server decodes with zxingcpp (best) then OpenCV fallback
+@app.post("/api/decode-qr")
+async def decode_qr(file: UploadFile = File(...)):
+    import numpy as np
+    from PIL import Image as PILImage, ImageOps
+    import io
+
+    contents = await file.read()
+    debug = {"bytes": len(contents), "zxing_results": None, "zxing_error": None, "cv2_error": None}
+
+    # --- Primary: zxingcpp ---
+    try:
+        import zxingcpp
+        pil_img = PILImage.open(io.BytesIO(contents))
+        pil_img = ImageOps.exif_transpose(pil_img)
+        debug["img_size"] = f"{pil_img.width}x{pil_img.height}"
+
+        # Try RGB at full resolution first (dense QR codes need all the pixels)
+        rgb = pil_img.convert("RGB")
+        results = zxingcpp.read_barcodes(rgb)
+        debug["zxing_results"] = len(results)
+        if results:
+            return {"ok": True, "data": results[0].text}
+
+        # Try grayscale — sometimes higher contrast helps
+        gray = pil_img.convert("L").convert("RGB")
+        results = zxingcpp.read_barcodes(gray)
+        if results:
+            return {"ok": True, "data": results[0].text}
+
+        # Try scaled to 2000px (reduce noise on huge photos without losing module detail)
+        if pil_img.width > 2000:
+            scale = 2000 / pil_img.width
+            pil_mid = rgb.resize((2000, int(pil_img.height * scale)), PILImage.LANCZOS)
+            results = zxingcpp.read_barcodes(pil_mid)
+            if results:
+                return {"ok": True, "data": results[0].text}
+
+    except Exception as e:
+        debug["zxing_error"] = str(e)
+
+    # --- Fallback: pyzbar ---
+    try:
+        from pyzbar.pyzbar import decode as pyz_decode
+        from PIL import ImageEnhance
+        pil_img2 = PILImage.open(io.BytesIO(contents))
+        pil_img2 = ImageOps.exif_transpose(pil_img2).convert("RGB")
+        # Boost contrast to help pyzbar
+        pil_img2 = ImageEnhance.Contrast(pil_img2).enhance(2.0)
+        decoded = pyz_decode(pil_img2)
+        if decoded:
+            return {"ok": True, "data": decoded[0].data.decode("utf-8")}
+        debug["pyzbar"] = "0 results"
+    except Exception as e:
+        debug["pyzbar_error"] = str(e)
+
+    # --- Fallback: OpenCV ---
+    try:
+        nparr = np.frombuffer(contents, np.uint8)
+        img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+        if img is not None:
+            detector = cv2.QRCodeDetector()
+            data, _, _ = detector.detectAndDecode(img)
+            if data:
+                return {"ok": True, "data": data}
+    except Exception as e:
+        debug["cv2_error"] = str(e)
+
+    print(f"decode-qr debug: {debug}")
+    return {"ok": False, "error": "No QR code found", "debug": debug}
 
 # Step 1: Uploads the raw fingerprint card image.
 # Creates a new session and saves the original image.

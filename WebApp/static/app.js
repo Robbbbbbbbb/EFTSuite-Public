@@ -1123,8 +1123,12 @@ let captureMode = 'slaps'; // 'slaps' or 'full'
 let captureSequence = [];
 let captureStepIndex = 0;
 let capturedPrints = {}; // Map of ID -> Base64
+let capturedPrintQualities = {}; // Map of ID -> NFIQ quality score
 let currentCaptureImage = null;
+let currentCaptureQuality = 0; // NFIQ quality 0-100 (100=best) from last result
 let reconnectTimer = null;
+let isRolledPhase = false;     // true while waiting for ROLLED capture_result messages
+let rolledFingersReceived = 0;
 
 // Settings
 let scannerIP = localStorage.getItem('scanner_ip') || 'localhost';
@@ -1180,21 +1184,31 @@ function initCaptureMode() {
 
             let finalImg = msg.image;
             const currentItem = captureSequence[captureStepIndex];
-            // Mirror Slaps (13, 14, 15) due to scanner reversing them
-            if (currentItem && ['13', '14', '15'].includes(currentItem.id)) {
-                logToConsole("Correcting mirrored slap...");
+            // Mirror Thumbs only (15) — 4-finger slaps (13, 14) are not reversed
+            if (currentItem && ['15'].includes(currentItem.id)) {
+                logToConsole("Correcting mirrored thumbs...");
                 finalImg = await mirrorBase64(msg.image);
             }
 
             currentCaptureImage = finalImg;
+            currentCaptureQuality = msg.quality || 0;
 
             // Check Express Mode
             const isExpress = document.getElementById('chk-express-mode').checked;
             if (isExpress) {
                 acceptCapture();
             } else {
-                showCaptureResult(finalImg);
+                showCaptureResult(finalImg, currentCaptureQuality);
             }
+        } else if (msg.type === 'capture_result') {
+            // Legacy handler — only used if finger position is valid (>0)
+            if (!msg.finger || msg.finger <= 0) return; // ignore finger=0 ghost events
+            const fingerKey = msg.finger.toString();
+            capturedPrints[fingerKey] = msg.image;
+            capturedPrintQualities[fingerKey] = msg.quality || 0;
+            rolledFingersReceived++;
+            renderCaptureGallery();
+            logToConsole(`Rolled finger ${msg.finger} captured (quality: ${msg.quality})`);
         }
     };
 
@@ -1251,6 +1265,7 @@ function initCaptureMode() {
 function startCaptureSession(mode) {
     captureMode = mode;
     capturedPrints = {};
+    capturedPrintQualities = {};
     captureStepIndex = 0;
 
     if (mode === 'slaps') {
@@ -1324,7 +1339,11 @@ function updateCaptureUI() {
         listContainer.appendChild(div);
     }
 
-    document.getElementById('capture-instruction').textContent = "Place " + currentItem.label;
+    const fingerId = parseInt(currentItem.id);
+    const isRolledFinger = !isNaN(fingerId) && fingerId >= 1 && fingerId <= 10;
+    document.getElementById('capture-instruction').textContent = isRolledFinger
+        ? `Roll ${currentItem.label} — nail to nail`
+        : `Place ${currentItem.label}`;
     resetCaptureButtons(true);
 
     // Update Gallery
@@ -1364,13 +1383,33 @@ function renderCaptureGallery() {
             ph.textContent = 'Skipped (Unprintable)';
             div.appendChild(ph);
         } else {
+            const imgWrap = document.createElement('div');
+            imgWrap.style.position = 'relative';
+            imgWrap.style.width = '100%';
+            imgWrap.style.height = '80px';
+            imgWrap.style.background = '#000';
+
             const img = document.createElement('img');
             img.src = "data:image/png;base64," + capturedPrints[k];
             img.style.width = '100%';
             img.style.height = '80px';
             img.style.objectFit = 'contain';
             img.style.backgroundColor = '#000';
-            div.appendChild(img);
+            imgWrap.appendChild(img);
+
+            // Quality badge
+            const q = capturedPrintQualities[k] !== undefined ? capturedPrintQualities[k] : null;
+            if (q !== null) {
+                const qColor  = q >= 75 ? '#27ae60' : q >= 50 ? '#e67e22' : '#e74c3c';
+                const qLabel  = q >= 75 ? 'Good' : q >= 50 ? 'Fair' : 'Poor';
+                const badge = document.createElement('div');
+                badge.textContent = `${q} ${qLabel}`;
+                badge.style.cssText = `position:absolute;bottom:3px;right:3px;background:${qColor};`+
+                    `color:#fff;font-size:10px;font-weight:bold;padding:2px 5px;`+
+                    `border-radius:4px;opacity:0.92;pointer-events:none;`;
+                imgWrap.appendChild(badge);
+            }
+            div.appendChild(imgWrap);
         }
 
         container.appendChild(div);
@@ -1423,34 +1462,42 @@ function startCapture() {
     const currentItem = captureSequence[captureStepIndex];
     if (!currentItem) return;
 
-    // Send generic START_CAPTURE. 
-    // The param usually tells the scanner what to expect (e.g. flat vs roll). 
-    // If we want "flat scans" for everything (as user requested), we send "FLAT" or similar?
-    // Existing code sent "L_SLAP", "R_SLAP". The helper probably decides based on that.
-    // If we send raw expectation, maybe we need to update Helper? 
-    // Assuming Helper just takes a string title or mode.
-    // Ideally we pass "FLAT" for all because user said "capture as flat scans".
-    // But passing legacy "L_SLAP" might trigger specific auto-capture logic.
-    // For Rolled fingers (1-10), we might want to capture as flats.
-    // I'll send the ID or Label.
-
     ws.send(JSON.stringify({ action: "START_CAPTURE", param: currentItem.id }));
+}
+
+function clearQualityOverlay() {
+    const el = document.getElementById('capture-overlay');
+    if (el) el.innerHTML = '';
 }
 
 function cancelCapture() {
     ws.send(JSON.stringify({ action: "CANCEL" }));
+    isRolledPhase = false;
+    rolledFingersReceived = 0;
+    clearQualityOverlay();
     resetCaptureButtons(true);
 }
 
-function showCaptureResult(base64) {
+function showCaptureResult(base64, quality) {
     document.getElementById('scanner-preview').src = "data:image/png;base64," + base64;
     document.getElementById('btn-cap-cancel').classList.add('hidden');
     document.getElementById('btn-cap-accept').classList.remove('hidden');
     document.getElementById('btn-cap-retry').classList.remove('hidden');
+
+    // Show NFIQ quality score as a badge overlaid on the preview image
+    const q = (quality !== undefined && quality !== null) ? quality : 0;
+    const qColor  = q >= 75 ? '#27ae60' : q >= 50 ? '#e67e22' : '#e74c3c';
+    const qBorder = q >= 75 ? '#1e8449' : q >= 50 ? '#ca6f1e' : '#c0392b';
+    const qLabel  = q >= 75 ? 'Good'    : q >= 50 ? 'Fair'    : 'Poor';
+    document.getElementById('capture-overlay').innerHTML =
+        `<div style="background:${qColor};border:2px solid ${qBorder};color:#fff;font-size:22px;`+
+        `font-weight:bold;padding:8px 18px;border-radius:8px;opacity:0.92;`+
+        `box-shadow:0 2px 8px rgba(0,0,0,0.5);">${q} — ${qLabel}</div>`;
 }
 
 function retryCapture() {
     currentCaptureImage = null;
+    clearQualityOverlay();
     startCapture();
 }
 
@@ -1459,6 +1506,7 @@ function resetCapture() {
     document.getElementById('capture-wizard').classList.add('hidden');
     document.getElementById('capture-mode-select').classList.remove('hidden');
     capturedPrints = {};
+    capturedPrintQualities = {};
     captureStepIndex = 0;
 }
 
@@ -1466,7 +1514,9 @@ function acceptCapture() {
     const currentItem = captureSequence[captureStepIndex];
     if (currentItem && currentCaptureImage) {
         capturedPrints[currentItem.id] = currentCaptureImage;
+        capturedPrintQualities[currentItem.id] = currentCaptureQuality;
         captureStepIndex++;
+        clearQualityOverlay();
         updateCaptureUI();
         checkExpressAutoAdvance();
     }
