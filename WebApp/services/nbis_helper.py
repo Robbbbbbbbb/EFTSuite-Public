@@ -176,29 +176,32 @@ def convert_to_wsq(raw_path: str, output_path: str, width: int, height: int, bit
     Returns:
         Path to the generated WSQ file.
     """
-    # cwsq <rate> wsq <outfile> -r <infile> <w> <h> <depth> <ppi>
-    # Note: cwsq arguments might vary by version, but this is the standard NBIS usage.
-    
+    # cwsq <r bitrate> <outext> <image file> [-raw_in w,h,d,[ppi]] [comment file]
+    # w,h,d,ppi must be a single comma-joined token, not separate args.
+    ext = os.path.splitext(output_path)[1].lstrip(".")
+
     command = [
-        "cwsq", 
-        str(bitrate), 
-        "wsq", 
-        output_path, 
-        "-r", 
-        raw_path, 
-        str(width), 
-        str(height), 
-        str(depth), 
-        str(ppi)
+        "cwsq",
+        str(bitrate),
+        ext,
+        raw_path,
+        "-raw_in",
+        f"{width},{height},{depth},{ppi}"
     ]
-    
+
     stdout, stderr, returncode = run_command(command, cwd=os.path.dirname(raw_path))
-    
+
     if returncode != 0:
         raise Exception(f"cwsq failed: {stderr}")
-        
+
+    # cwsq names its output after raw_path (extension stripped) + outext,
+    # which may differ from the caller's requested output_path.
+    produced_path = os.path.splitext(raw_path)[0] + "." + ext
+    if produced_path != output_path and os.path.exists(produced_path):
+        os.replace(produced_path, output_path)
+
     if not os.path.exists(output_path):
         raise Exception(f"cwsq failed to create output file: {stderr}")
-        
+
     return output_path
 
