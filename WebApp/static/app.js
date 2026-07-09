@@ -1562,6 +1562,11 @@ const eftUploadArea = document.querySelector('#edit-view-upload .upload-area');
 
 setupUploadZone(eftUploadArea, eftFileInput, handleEftUpload);
 
+document.getElementById('toggle-show-slaps').addEventListener('change', (e) => {
+    showSlapsWithRolled = e.target.checked;
+    if (lastEftData) renderEFTImages(lastEftData);
+});
+
 async function handleEftUpload(file) {
     const formData = new FormData();
     formData.append("file", file);
@@ -1691,6 +1696,17 @@ function renderEFTData(data, editMode) {
     }
 
     // 3. Images
+    lastEftData = data;
+    renderEFTImages(data);
+}
+
+// Whether to show the slap/plain-impressions section when rolled prints are
+// also present in the file. When there are no rolled prints, slaps always
+// show - this only gates the "both present" case.
+let showSlapsWithRolled = false;
+let lastEftData = null;
+
+function renderEFTImages(data) {
     const imgContainer = document.getElementById('edit-img-container');
     imgContainer.innerHTML = '';
 
@@ -1705,6 +1721,11 @@ function renderEFTData(data, editMode) {
     // Check for Slaps (13-15)
     // 14: L Slap, 13: R Slap, 15: Thumbs
     const slaps = cleanImages.filter(img => [13, 14, 15].includes(img.fgpInt));
+
+    // Only offer the toggle when both rolled prints and slaps are present -
+    // otherwise there's nothing to choose between.
+    const toggleWrap = document.getElementById('slap-toggle-wrap');
+    toggleWrap.classList.toggle('hidden', !(rolled.length > 0 && slaps.length > 0));
 
     const createEditCard = (label, url) => {
         const div = document.createElement('div');
@@ -1768,50 +1789,50 @@ function renderEFTData(data, editMode) {
 
         const leftHand = rolled.filter(i => i.fgpInt >= 6 && i.fgpInt <= 10);
         if (leftHand.length > 0) imgContainer.appendChild(createHandSection("Left Hand", leftHand));
+    }
 
-        // Hide Slaps/Others if Rolled are present, per user request.
+    // Slaps (13: Right Slap, 14: Left Slap, 15: Thumbs) always render when
+    // there are no rolled prints; when rolled prints are also present, only
+    // render if the user has opted in via the toggle checkbox.
+    if (slaps.length > 0 && (rolled.length === 0 || showSlapsWithRolled)) {
+        // Sort order: 14 (L), 13 (R), 15 (Thumbs)
+        const slapOrder = { 14: 1, 13: 2, 11: 2.1, 12: 2.2, 15: 3 };
+        // Standard Type 14 is 13, 14, 15.
 
-    } else {
-        // If NO Rolled prints, show Slaps and Others (e.g. Type 14 upload)
+        const sortedSlaps = slaps.sort((a, b) => (slapOrder[a.fgpInt] || 99) - (slapOrder[b.fgpInt] || 99));
 
-        if (slaps.length > 0) {
-            // Render Slaps
-            // Sort order: 14 (L), 13 (R), 15 (Thumbs)
-            const slapOrder = { 14: 1, 13: 2, 11: 2.1, 12: 2.2, 15: 3 };
-            // Standard Type 14 is 13, 14, 15.
+        const sectDiv = document.createElement('div');
+        sectDiv.style.width = '100%';
+        sectDiv.style.marginTop = '15px';
 
-            const sortedSlaps = slaps.sort((a, b) => (slapOrder[a.fgpInt] || 99) - (slapOrder[b.fgpInt] || 99));
+        const hdr = document.createElement('h4');
+        hdr.textContent = "Plain / Slap Impressions";
+        hdr.style.margin = '0 0 10px 0';
+        hdr.style.color = '#aaa';
+        hdr.style.borderBottom = '1px solid #444';
+        hdr.style.paddingBottom = '5px';
+        sectDiv.appendChild(hdr);
 
-            const sectDiv = document.createElement('div');
-            sectDiv.style.width = '100%';
-            sectDiv.style.marginTop = '15px';
+        const row = document.createElement('div');
+        row.style.display = 'flex';
+        row.style.gap = '10px';
+        row.style.justifyContent = 'center';
+        row.style.flexWrap = 'wrap';
+        sectDiv.appendChild(row);
 
-            const hdr = document.createElement('h4');
-            hdr.textContent = "Plain / Slap Impressions";
-            hdr.style.margin = '0 0 10px 0';
-            hdr.style.color = '#aaa';
-            hdr.style.borderBottom = '1px solid #444';
-            hdr.style.paddingBottom = '5px';
-            sectDiv.appendChild(hdr);
+        const slapLabels = { 14: "Left Slap", 13: "Right Slap", 15: "Thumbs" };
 
-            const row = document.createElement('div');
-            row.style.display = 'flex';
-            row.style.gap = '10px';
-            row.style.justifyContent = 'center';
-            row.style.flexWrap = 'wrap';
-            sectDiv.appendChild(row);
+        sortedSlaps.forEach(img => {
+            const label = slapLabels[img.fgpInt] || `FP ${img.fgp}`;
+            row.appendChild(createEditCard(label, img.url));
+        });
 
-            const slapLabels = { 14: "Left Slap", 13: "Right Slap", 15: "Thumbs" };
+        imgContainer.appendChild(sectDiv);
+    }
 
-            sortedSlaps.forEach(img => {
-                const label = slapLabels[img.fgpInt] || `FP ${img.fgp}`;
-                row.appendChild(createEditCard(label, img.url));
-            });
-
-            imgContainer.appendChild(sectDiv);
-        }
-
-        // Fallback for others (e.g. Palm or unknown)
+    if (rolled.length === 0) {
+        // Fallback for others (e.g. Palm or unknown) - only shown when there's
+        // no rolled layout to slot them into.
         const others = cleanImages.filter(img => {
             const i = img.fgpInt;
             const isRolled = (i >= 1 && i <= 10);

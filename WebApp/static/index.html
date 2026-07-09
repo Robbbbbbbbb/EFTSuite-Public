@@ -589,7 +589,14 @@
                         <br>
 
                         <!-- Image Gallery -->
-                        <h3>Embedded Fingerprints</h3>
+                        <div style="display: flex; justify-content: space-between; align-items: center;">
+                            <h3>Embedded Fingerprints</h3>
+                            <label id="slap-toggle-wrap" class="hidden"
+                                style="display: flex; align-items: center; gap: 6px; font-size: 0.9rem; color: #aaa; cursor: pointer;">
+                                <input type="checkbox" id="toggle-show-slaps">
+                                Show Plain/Slap Impressions
+                            </label>
+                        </div>
                         <div class="review-images-container">
                             <div id="edit-img-container"
                                 style="display: flex; flex-wrap: wrap; gap: 10px; justify-content: center;">
