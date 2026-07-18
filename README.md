@@ -16,7 +16,8 @@ This new version of EFT Suite is inspired by the original OpenEFT (which I've be
 7.  **Data Entry**: Validates and collects required Type-2 demographic data (Name, DOB, SSN, etc.).
 8.  **EFT Generation**: Uses compiled NBIS tools (`an2k`, `nfiq`, `opj_compress`) to generate compliant EFT files.
 9.  **Multi-Type Support**: Allows users to pick from Type-14 prints and full Type-4 (rolled) prints. **Note**: By default, Type-14 is legacy and must be enabled in settings.
-10.  **Smart Compression**: Automatically ensures the final EFT file is under ATF's 12MB limit by adjusting NBIS lossless compression ratios if needed.
+10.  **Smart Compression**: Automatically ensures the final EFT file is under ATF's 12MB limit by adjusting NBIS lossless compression ratios if needed. Certain vendors request EFTs under 5MB. Added an optional reduced filesize option in 2.0.4 that supports this.
+11.  **API Support**: FastAPI is supported; use the /docs/ url to access the endpoint documentation.
 
 ## Prerequisites
 
