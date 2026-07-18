@@ -1042,6 +1042,24 @@ btnSubmit.onclick = async () => {
         link.href = result.download_url;
         link.setAttribute('download', result.filename);
 
+        // Reduced Filesize EFT
+        const reducedLink = document.getElementById('download-link-reduced');
+        const reducedWarning = document.getElementById('reduced-warning-text');
+        if (result.reduced_download_url) {
+            reducedLink.href = result.reduced_download_url;
+            reducedLink.setAttribute('download', result.reduced_filename);
+            reducedLink.classList.remove('hidden');
+            if (result.reduced_warning) {
+                reducedWarning.textContent = '⚠ ' + result.reduced_warning;
+                reducedWarning.style.display = 'block';
+            } else {
+                reducedWarning.style.display = 'none';
+            }
+        } else {
+            reducedLink.classList.add('hidden');
+            reducedWarning.style.display = 'none';
+        }
+
         currentStep = 4;
         updateWizardUI();
 

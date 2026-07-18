@@ -13,7 +13,7 @@ def align_image(img_path):
 
 # Logic to crop and rotate the image in case the user uploads something rotated 90/180/270 degrees or cropped out of alignment.
 def apply_crop_and_rotate(img_path, rotate_angle, crop_rect):
-    4# crop_rect: {x, y, w, h}
+    # crop_rect: {x, y, w, h}
     print(f"Applying crop/rotate: path={img_path}, rot={rotate_angle}, rect={crop_rect}")
     img = cv2.imread(img_path)
     if img is None:

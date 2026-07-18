@@ -323,7 +323,8 @@
                                     <h3>Type-14 (Legacy)</h3>
                                     <p>Standard Type-14 Records</p>
                                     <small style="color: #aaa;">(Left Slap, Right Slap, Thumbs)</small>
-                                    <div style="color: #ff4444; font-size: 0.8rem; margin-top: 5px;">No longer supported
+                                    <div style="color: #ff4444; font-size: 0.8rem; margin-top: 5px;">Not recommended.
+                                        Must enable in Settings.
                                     </div>
                                 </div>
                                 <div class="mode-selection-card" id="btn-gen-rolled">
@@ -708,14 +709,25 @@
                 <div id="step-download-panel" class="panel hidden" style="text-align: center; padding-top: 50px;">
                     <div style="font-size: 3rem; color: var(--accent-color);">✓</div>
                     <h2>File Ready</h2>
+                    <a id="download-link" href="#" class="btn" style="display: inline-block; margin: 15px 0;">Download
+                        .EFT File</a>
                     <br>
-                    <a id="download-link" href="#" class="btn">Download .EFT File</a>
-                    <br><br>
+                    <!-- Reduced Filesize EFT — only shown when full EFT exceeds 5 MB -->
+                    <a id="download-link-reduced" href="#" class="btn btn-secondary hidden"
+                        style="background-color: #2c3e50; border: 1px solid #546e7a; color: #b0bec5; display: inline-block; margin: 15px 0;"
+                        title="Same EFT compressed to ≤5 MB using WSQ at minimum FBI-compliant bitrate (0.75)">
+                        ⬇ Download Reduced Size EFT (≤5 MB)
+                    </a>
+                    <div id="reduced-warning-text"
+                        style="display:none; margin-top: 8px; color: #e67e22; font-size: 0.8rem;"></div>
+                    <br>
                     <button id="btn-dl-fd258" class="btn hidden"
-                        style="background-color: white; color: black; border: 1px solid #ccc;">Generate Printable FD-258
+                        style="background-color: white; color: black; border: 1px solid #ccc; display: inline-block; margin: 15px 0;">Generate
+                        Printable FD-258
                         Card</button>
-                    <br><br>
-                    <button id="btn-restart" class="btn btn-secondary">Start Over</button>
+                    <br>
+                    <button id="btn-restart" class="btn btn-secondary"
+                        style="display: inline-block; margin: 15px 0;">Start Over</button>
 
                     <div id="support-content"
                         style="margin-top: 40px; text-align: left; background: #222; padding: 20px; border-radius: 8px; border: 1px solid #444;">

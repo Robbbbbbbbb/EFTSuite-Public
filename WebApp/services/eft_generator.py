@@ -7,8 +7,7 @@ import random
 from services.eft_helper import Type1, Type2, Type14, Type4, get_date
 from services.fingerprint import Fingerprint 
 
-# Define temp directory location
-TMP_DIR = "/app/temp"
+from services.session_store import TMP_DIR
 
 from services.nbis_helper import verify_eft
 
@@ -81,13 +80,14 @@ def get_initials(name_str: str) -> str:
         return "XXX"
 
 # Orchestrate EFT generation
-def generate_eft(data: dict, session_id: str, prints_map: dict, mode: str = "atf") -> str:
+def generate_eft(data: dict, session_id: str, prints_map: dict, mode: str = "atf", max_size_bytes: float = 11.0 * 1024 * 1024, allow_scale_down: bool = False) -> str:
     """
     Args:
     - data (dict): A dictionary containing Type-2 field values.
     - session_id (str): A unique identifier for the current user session.
     - prints_map (dict): A dictionary mapping finger position numbers (int) to `Fingerprint` objects.
     - mode (str): Generation mode - 'atf' (Type-14) or 'rolled' (Type-4).
+    - allow_scale_down (bool): If True, allows resolution down-scaling to achieve size constraints (used for reduced variant).
     Returns:
     - str: The absolute path to the generated EFT file.
     """
@@ -95,7 +95,7 @@ def generate_eft(data: dict, session_id: str, prints_map: dict, mode: str = "atf
     
     # Dynamic Compression Strategy
     # 1. Try RAW (No compression)
-    # 2. If > 11.8 MB, try WSQ with decreasing bitrate
+    # 2. If > 11.0 MB, try WSQ with decreasing bitrate
     
     # Bitrates to try: High Quality -> Standard Quality
     # 3.5 is very high quality (near lossless visually for fingerprints)
@@ -106,7 +106,7 @@ def generate_eft(data: dict, session_id: str, prints_map: dict, mode: str = "atf
     sorted_prints = sorted(prints_map.items(), key=lambda item: int(item[0]))
     
     # Helper to build EFT with current compression state
-    def build_eft_attempt(compression_type, bitrate=None):
+    def build_eft_attempt(compression_type, bitrate=None, resolution_scale=1.0):
         t1 = Type1()
         t2 = Type2(0) # IDC 0 for Type 2
         
@@ -185,9 +185,9 @@ def generate_eft(data: dict, session_id: str, prints_map: dict, mode: str = "atf
                 if 1 <= num <= 14:
                     # Convert based on strategy
                     if compression_type == "RAW":
-                        fp_obj.process_and_convert_raw(type4=True)
+                        fp_obj.process_and_convert_raw(type4=True, resolution_scale=resolution_scale)
                     else:
-                        fp_obj.process_and_convert_wsq(bitrate=bitrate, type4=True)
+                        fp_obj.process_and_convert_wsq(bitrate=bitrate, type4=True, resolution_scale=resolution_scale)
                         
                     # Type 4
                     t4 = Type4(fp_obj, idc=num) # IDC matches FGP
@@ -201,9 +201,9 @@ def generate_eft(data: dict, session_id: str, prints_map: dict, mode: str = "atf
                 if int(fp_num) in [13, 14, 15]: # Only Left Slap, Right Slap, and Thumbs
                     # Convert based on strategy
                     if compression_type == "RAW":
-                        fp_obj.process_and_convert_raw(type4=False)
+                        fp_obj.process_and_convert_raw(type4=False, resolution_scale=resolution_scale)
                     else:
-                        fp_obj.process_and_convert_wsq(bitrate=bitrate, type4=False)
+                        fp_obj.process_and_convert_wsq(bitrate=bitrate, type4=False, resolution_scale=resolution_scale)
                         
                     t14 = Type14(fp_obj, idc)
                     t14.fcd = get_date().split(':')[0]
@@ -216,38 +216,65 @@ def generate_eft(data: dict, session_id: str, prints_map: dict, mode: str = "atf
         return output_path
 
     # Execution Loop
-    final_path = ""
+    # We want to keep the file size as close to the limit as possible to maximize image quality.
+    # We try scales sequentially from 1.0 down to 0.40 (if allow_scale_down is True, otherwise we strictly only use scale 1.0).
+    # For each scale, we check feasibility at the minimum bitrate (0.75) first.
+    # If the scale is feasible, we find the highest possible bitrate that fits.
+    if allow_scale_down:
+        scales = [1.0, 0.95, 0.90, 0.85, 0.80, 0.75, 0.70, 0.65, 0.60, 0.55, 0.50, 0.45, 0.40]
+    else:
+        scales = [1.0]
     
-    # 1. Try RAW
-    print("Attempting RAW (No Compression)...")
-    try:
-        final_path = build_eft_attempt("RAW")
-        size_mb = os.path.getsize(final_path) / (1024 * 1024)
-        print(f"RAW EFT Size: {size_mb:.2f} MB")
-        
-        if size_mb < 11.8:
-            print("RAW fits! Returning.")
-            return verify_and_return(final_path)
-    except Exception as e:
-        print(f"RAW attempt failed: {e}")
-
-    # 2. Try WSQ Loop
-    for rate in bitrates:
-        print(f"Attempting WSQ @ {rate}...")
+    for scale in scales:
+        print(f"Testing feasibility for scale {scale} at bitrate 0.75...")
         try:
-            final_path = build_eft_attempt("WSQ", bitrate=rate)
-            size_mb = os.path.getsize(final_path) / (1024 * 1024)
-            print(f"WSQ {rate} EFT Size: {size_mb:.2f} MB")
+            test_path = build_eft_attempt("WSQ", bitrate=0.75, resolution_scale=scale)
+            test_size = os.path.getsize(test_path)
+            print(f"Scale {scale} @ 0.75 size: {test_size / (1024 * 1024):.2f} MB")
             
-            if size_mb < 11.8:
-                print(f"WSQ {rate} fits! Returning.")
-                return verify_and_return(final_path)
+            if test_size > max_size_bytes and allow_scale_down:
+                # Even the lowest quality at this scale is too large, skip this scale entirely
+                print(f"Scale {scale} is too large even at 0.75. Skipping scale.")
+                continue
+                
+            # If we get here, this scale is feasible!
+            # Find the highest bitrate that fits at this scale.
+            if scale >= 0.95:
+                scale_bitrates = [3.5, 3.25, 3.0, 2.75, 2.5, 2.25, 2.0, 1.75, 1.5, 1.25, 1.0, 0.75]
+            elif scale >= 0.80:
+                scale_bitrates = [2.5, 2.25, 2.0, 1.75, 1.5, 1.25, 1.0, 0.75]
+            elif scale >= 0.60:
+                scale_bitrates = [2.0, 1.75, 1.5, 1.25, 1.0, 0.75]
+            else:
+                scale_bitrates = [1.5, 1.25, 1.0, 0.75]
+                
+            for rate in scale_bitrates:
+                if rate == 0.75:
+                    print(f"Using pre-verified fallback: scale {scale} @ 0.75")
+                    return verify_and_return(test_path)
+                    
+                print(f"Trying scale {scale} @ {rate}...")
+                try:
+                    final_path = build_eft_attempt("WSQ", bitrate=rate, resolution_scale=scale)
+                    size_bytes = os.path.getsize(final_path)
+                    print(f"Scale {scale} @ {rate} size: {size_bytes / (1024 * 1024):.2f} MB")
+                    if size_bytes <= max_size_bytes:
+                        print(f"Found optimal configuration: scale {scale} @ {rate} ({size_bytes / (1024 * 1024):.2f} MB)")
+                        return verify_and_return(final_path)
+                except Exception as e:
+                    print(f"Failed attempt for scale {scale} @ {rate}: {e}")
+                    
         except Exception as e:
-            print(f"WSQ {rate} attempt failed: {e}")
+            print(f"Feasibility check failed for scale {scale}: {e}")
             
-    # Fallback: Return the last generated file (even if slightly over, better than nothing, or it's the smallest we could do)
-    print("WARNING: Could not meet 11.8 MB limit even with lowest quality. Returning smallest file.")
-    return verify_and_return(final_path)
+    # Fallback: Return the last generated file if none was feasible
+    print(f"WARNING: Could not meet {max_size_bytes / (1024 * 1024):.2f} MB limit even with lowest resolution and quality. Returning smallest file.")
+    try:
+        fallback_path = build_eft_attempt("WSQ", bitrate=0.75, resolution_scale=0.40 if allow_scale_down else 1.0)
+        return verify_and_return(fallback_path)
+    except Exception as e:
+        print(f"Absolute fallback failed: {e}")
+        return verify_and_return(test_path)
 
 def verify_and_return(output_path):
     # Verify the generated EFT file

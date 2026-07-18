@@ -10,15 +10,15 @@ class Finger:
     Represents a single segmented fingerprint (usually from a slap image).
     
     Attributes:
-        orgID (str): Vendor ID for the quality algorithm (defaults to "15" for NFIQv1).
-        algID (str): Algorithm ID (defaults to "14205" for NFIQv1).
-        str_data (str): The raw output string from `nfseg` describing the segment.
-        n (str): Finger position number (1-10).
-        sw, sh (int): Width and height of the segment.
-        sx, sy (int): Top-left coordinates of the segment relative to the original image.
-        t (float): Rotation angle (theta) in degrees.
-        score (str): NFIQ quality score (1-5).
-        tmpdir (str): Directory where the segment file resides.
+        - orgID (str): Vendor ID for the quality algorithm (defaults to "15" for NFIQv1).
+        - algID (str): Algorithm ID (defaults to "14205" for NFIQv1).
+        - str_data (str): The raw output string from `nfseg` describing the segment.
+        - n (str): Finger position number (1-10).
+        - sw, sh (int): Width and height of the segment.
+        - sx, sy (int): Top-left coordinates of the segment relative to the original image.
+        - t (float): Rotation angle (theta) in degrees.
+        - score (str): NFIQ quality score (1-5).
+        - tmpdir (str): Directory where the segment file resides.
     """
     def __init__(self, str_data, tmpdir):
         self.orgID = "15" # Vendor ID for NFIQv1
@@ -36,10 +36,8 @@ class Finger:
         self.segmentQuality()
 
     def readString(self):
-        """
-        Parses the output string from `nfseg` to populate attributes.
-        Example input: 'FILE lfour_10.raw e 3 sw 168 sh 280 sx 120 sy 256 th -28.3'
-        """
+        # Parses the output string from `nfseg` to populate attributes. ( Example input: 'FILE lfour_10.raw e 3 sw 168 sh 280 sx 120 sy 256 th -28.3' )
+
         vals = self.str.split(' ')
         try:
             self.name = vals[1]
@@ -74,7 +72,7 @@ class Finger:
     def computeBox(self):
         """
         Calculates the bounding box coordinates based on dimensions and rotation.
-        For Type-14 14.021, we need the bounding box of the segment in the original image.
+        For Type-14 14.021, the bounding box of the segment in the original image.
         nfseg provides Top-Left (sx, sy) and Width/Height (sw, sh).
         Field 14.021 requires: Left, Right, Top, Bottom.
         """
@@ -92,9 +90,9 @@ class Finger:
         self.y2 = str(top + sh)         # Bottom  
 
     def segmentQuality(self):
-        """
-        Computes the NFIQ quality score for this finger segment.
-        """
+
+        # Computes the NFIQ quality score for this finger segment.
+
         try:
             # Pass full path to nfiq
             full_path = os.path.join(self.tmpdir, self.name)
@@ -104,10 +102,9 @@ class Finger:
             self.score = "255"
 
     def getScoreString(self):
-        """
-        Returns the formatted score string for Type-14 record.
-        Maps plain thumb positions (11, 12) to standard finger positions (1, 6) for quality scoring.
-        """
+        
+       # Returns the formatted score string for Type-14 record. Maps plain thumb positions (11, 12) to standard finger positions (1, 6) for quality scoring.
+        
         n_val = self.n
         if self.n == "11":
             n_val = "1"
@@ -117,7 +114,7 @@ class Finger:
         return n_val + chr(US_CHAR) + self.score + chr(US_CHAR) + self.orgID + chr(US_CHAR) + self.algID
 
     def getPosString(self):
-        """Returns the formatted position string for Type-14 record."""
+        # Returns the formatted position string for Type-14 record.
         n_val = self.n
         if self.n == "11":
             n_val = "1"
@@ -131,11 +128,11 @@ class Fingerprint:
     Represents a source fingerprint image (e.g., a slap or a thumb) to be processed.
     
     Attributes:
-        img (numpy.ndarray): The image data in grayscale.
-        fp_number (int): The FBI finger position code (13=R Slap, 14=L Slap, 15=Thumbs).
-        name (str): Unique identifier for this fingerprint instance.
-        fingers (List[Finger]): List of segmented `Finger` objects if this is a slap image.
-        converted (str): Path to the converted JP2 file.
+        - img (numpy.ndarray): The image data in grayscale.
+        - fp_number (int): The FBI finger position code (13=R Slap, 14=L Slap, 15=Thumbs).
+        - name (str): Unique identifier for this fingerprint instance.
+        - fingers (List[Finger]): List of segmented `Finger` objects if this is a slap image.
+        - converted (str): Path to the converted JP2 file.
     """
     def __init__(self, src_img, fp_number, tmpdir, session_id):
         self.tmpdir = tmpdir
@@ -156,6 +153,8 @@ class Fingerprint:
         else:
             self.img = src_img
             
+        self.original_img = self.img.copy() # Store stateless copy to avoid progressive scaling bugs
+            
         print(f"FP {fp_number} Image Shape: {self.img.shape}")
         self.fingers = []
         
@@ -166,40 +165,89 @@ class Fingerprint:
         self.slc = "1"                    # Scale Units (Pixels per inch)
         
         # Fixed constants as per FBI EFT Specification
-        self.hps = "2400"                 # Horizontal Pixel Scale
-        self.vps = "2400"                 # Vertical Pixel Scale
+        self.hps = "1969"                 # Horizontal Pixel Scale (500 PPI)
+        self.vps = "1969"                 # Vertical Pixel Scale (500 PPI)
         self.cga = "NONE"                 # Compression Algorithm (Default None)
         self.bpx = "8"                    # Bits Per Pixel
-
-    def _prepare_type4_dimensions(self):
-        """
-        Resizes the image to meet Type-4 strict dimension requirements.
-        """
-        target_w, target_h = 0, 0
+ 
+    def _prepare_dimensions(self, resolution_scale: float = 1.0):
+        # Auto-detects whether the source print belongs to a 500 DPI or 1000 DPI scan and pads the image to meet target dimension requirements.
         fp_num = int(self.fp_number)
+        h_img, w_img = self.original_img.shape[:2]
         
-        if 1 <= fp_num <= 10:
-            target_w, target_h = 800, 750
-        elif 11 <= fp_num <= 12:
-            target_w, target_h = 400, 572
-        elif 13 <= fp_num <= 14:
-            target_w, target_h = 1600, 1000
-        else:
-            return # No resize needed
+        # Auto-detect DPI based on original segment width
+        # (Thresholds are roughly halfway between 500 DPI and 1000 DPI standard sizes)
+        is_1000_dpi = False
+        if 1 <= fp_num <= 10 and w_img >= 1200:
+            is_1000_dpi = True
+        elif 11 <= fp_num <= 12 and w_img >= 750:
+            is_1000_dpi = True
+        elif 13 <= fp_num <= 15 and w_img >= 2400:
+            is_1000_dpi = True
             
-        print(f"Resizing FP {fp_num} to {target_w}x{target_h} for Type-4")
-        resized_img = cv2.resize(self.img, (target_w, target_h), interpolation=cv2.INTER_AREA)
+        base_hps = 3937 if is_1000_dpi else 1969
         
-        self.img = resized_img
+        # Determine base target size
+        if is_1000_dpi:
+            # 1000 DPI targets
+            if 1 <= fp_num <= 10:
+                target_w, target_h = 1600, 1500
+            elif 11 <= fp_num <= 12:
+                target_w, target_h = 1000, 2000
+            elif 13 <= fp_num <= 15:
+                target_w, target_h = 3200, 2000  # FBI Type-4 standard cap height is 2000px at 1000 DPI
+            else:
+                return
+        else:
+            # 500 DPI targets
+            if 1 <= fp_num <= 10:
+                target_w, target_h = 800, 750
+            elif 11 <= fp_num <= 12:
+                target_w, target_h = 500, 1000
+            elif 13 <= fp_num <= 15:
+                target_w, target_h = 1600, 1000  # FBI Type-4 standard cap height is 1000px at 500 DPI
+            else:
+                return
+            
+        if resolution_scale != 1.0:
+            target_w = int(target_w * resolution_scale)
+            target_h = int(target_h * resolution_scale)
+            
+        print(f"Preparing dimensions for FP {fp_num} to {target_w}x{target_h} (white background pad, scale={resolution_scale}, 1000dpi={is_1000_dpi})")
+        
+        # Original dimensions (from original copy)
+        h_img, w_img = self.original_img.shape[:2]
+        
+        # Calculate scale to fit within target_w and target_h while preserving aspect ratio
+        scale = min(target_w / w_img, target_h / h_img)
+        new_w = int(w_img * scale)
+        new_h = int(h_img * scale)
+        
+        # Resize print from original image
+        resized_print = cv2.resize(self.original_img, (new_w, new_h), interpolation=cv2.INTER_AREA)
+        
+        # Create white background canvas
+        canvas = np.ones((target_h, target_w), dtype=np.uint8) * 255
+        
+        # Center the print
+        x_offset = (target_w - new_w) // 2
+        y_offset = (target_h - new_h) // 2
+        canvas[y_offset:y_offset+new_h, x_offset:x_offset+new_w] = resized_print
+        
+        self.img = canvas
         self.hll = str(target_w)
         self.vll = str(target_h)
+        
+        # Scale resolution metadata accordingly
+        scaled_hps = int(base_hps * resolution_scale)
+        self.hps = str(scaled_hps)
+        self.vps = str(scaled_hps)
 
-    def process_and_convert_raw(self, type4=False):
+    def process_and_convert_raw(self, type4=False, resolution_scale: float = 1.0):
         """
         Saves the image as raw bytes (uncompressed).
         """
-        if type4:
-            self._prepare_type4_dimensions()
+        self._prepare_dimensions(resolution_scale=resolution_scale)
 
         raw_path = os.path.join(self.tmpdir, self.name + ".raw")
         with open(raw_path, "wb") as f:
@@ -209,22 +257,20 @@ class Fingerprint:
         self.cga = "NONE"
         print(f"FP {self.fp_number} Saved Raw: {raw_path}")
         
-        # Segment slaps if Type-14 (Type-4 usually doesn't segment slaps in this context)
+        # Segment slaps if Type-14 (Type-4 doesn't segment slaps in this context)
         if not type4 and int(self.fp_number) >= 13:
-            # For segmentation we need a PNG usually because nfseg works on image files
-            # But we can save a temp png
+            # For segmentation use uncompressed PNG for nfseg
             png_path = os.path.join(self.tmpdir, self.name + ".png")
             cv2.imwrite(png_path, self.img)
             self.segment()
             
         return self.converted
 
-    def process_and_convert_wsq(self, bitrate=2.25, type4=False):
+    def process_and_convert_wsq(self, bitrate=2.25, type4=False, resolution_scale: float = 1.0):
         """
         Compresses the image using WSQ.
         """
-        if type4:
-            self._prepare_type4_dimensions()
+        self._prepare_dimensions(resolution_scale=resolution_scale)
 
         # Save Raw first (needed for cwsq)
         raw_path = os.path.join(self.tmpdir, self.name + ".raw")
@@ -258,10 +304,7 @@ class Fingerprint:
         return self.converted
 
     def process_and_convert(self, compression_ratio=10):
-        """
-        Legacy method for JP2 conversion (kept for backward compatibility if needed, 
-        but we are moving to WSQ/Raw).
-        """
+    # Legacy method for JP2 conversion (kept for backward compatibility if needed, but moved to WSQ/Raw in current logic).
         png_path = os.path.join(self.tmpdir, self.name + ".png")
         if not os.path.exists(png_path):
             cv2.imwrite(png_path, self.img)
@@ -290,9 +333,7 @@ class Fingerprint:
         return self.converted
 
     def process_and_convert_type4(self, compression_ratio=10):
-        """
-        Legacy Type-4 JP2 conversion.
-        """
+        # Legacy Type-4 JP2 conversion.
         self._prepare_type4_dimensions()
         return self.process_and_convert(compression_ratio)
 
@@ -333,16 +374,8 @@ class Fingerprint:
                 except:
                     pass
             
-            # Additional safety: Sort by X position (Left to Right) if finger numbers are missing/0?
-            # But assume n is correct for now.
-            
             # Sort by finger number
             filtered.sort(key=lambda x: int(x.n))
-            
-            # Cap count?
-            # If we have duplicate segments for same finger, take largest area?
-            # Or just take first provided by nfseg.
-            # "Found 8 max: 4" -> likely duplication.
             
             # De-duplicate by finger number
             unique_map = {}

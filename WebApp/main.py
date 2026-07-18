@@ -2,6 +2,7 @@ from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import JSONResponse, FileResponse
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import shutil
 import os
@@ -26,9 +27,37 @@ from services.eft_parser import EFTParser
 from services.eft_editor import EFTEditor
 from services.fd258_generator import FD258Generator
 from services.nbis_helper import convert_wsq_to_raw
+from services.session_store import SESSIONS, TMP_DIR, start_cleanup_task
+from services.api_v1 import router as api_v1_router
 
 
 app = FastAPI()
+
+# ── CORS: wide-open by default (private hosting model).
+# To restrict to specific origins, replace "*" with a list of allowed domains,
+# e.g. ["https://yourwordpresssite.com"].
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=False,  # must be False when allow_origins=["*"]
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# ── Register v1 API router
+app.include_router(api_v1_router)
+
+# ── Start session TTL cleanup task and export OpenAPI schema on startup
+@app.on_event("startup")
+async def on_startup():
+    start_cleanup_task()
+    try:
+        os.makedirs("static", exist_ok=True)
+        with open("static/openapi.json", "w") as f:
+            json.dump(app.openapi(), f, indent=2)
+        print("Successfully generated static/openapi.json")
+    except Exception as e:
+        print(f"Failed to generate static/openapi.json: {e}")
 
 # Logging handler for validation errors
 @app.exception_handler(RequestValidationError)
@@ -43,12 +72,10 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
 # Mount static files
 app.mount("/static", StaticFiles(directory="static"), name="static")
 
-# Temp storage
-TMP_DIR = "/app/temp"
+# Temp storage and session store are now managed by services/session_store.py.
+# TMP_DIR and SESSIONS are imported from there so both main.py and api_v1.py
+# share the same objects.
 os.makedirs(TMP_DIR, exist_ok=True)
-
-# In-memory session store
-SESSIONS = {}
 
 # Model selection box on the fingerprint card image.
 class Box(BaseModel):
@@ -539,43 +566,26 @@ async def generate_eft_endpoint(data: GenerateRequest):
     # Check if we have any valid objects
     if not fp_objects:
         raise HTTPException(status_code=400, detail="No valid fingerprints found to generate EFT.")
-
+    
     # Generate EFT with size safeguard
     try:
         # Inject bypass flag into type2_data for the generator
         gen_data = data.type2_data.copy()
         gen_data["bypass_ssn"] = data.bypass_ssn
 
-        # Initial generation with NO compression (Raw)
-        eft_path = generate_eft(gen_data, session_id, {fp.fp_number: fp for fp in fp_objects}, mode=data.mode)
+        # Generate EFT with 11.0 MB target limit and 12.0 MB upload limit
+        target_size = 11.0 * 1024 * 1024
+        max_size = 12.0 * 1024 * 1024
+        eft_path = generate_eft(
+            gen_data, session_id,
+            {fp.fp_number: fp for fp in fp_objects},
+            mode=data.mode,
+            max_size_bytes=target_size
+        )
         
-        # Check size (Max 11.8 MB)
-        max_size = 11.8 * 1024 * 1024
         current_size = os.path.getsize(eft_path)
-        
-        retries = 0
-        # WSQ Bitrates: Start high (2.25) and decrease by 0.5
-        bitrates = [2.25, 1.75, 1.25, 0.75] 
-        
-        # Re-compress and re-generate EFT if file exceeds limit
-        while current_size > max_size and retries < len(bitrates):
-            print(f"EFT size {current_size} exceeds limit. Re-compressing with WSQ bitrate {bitrates[retries]}...")
-            
-            # Re-compress all images
-            for fp in fp_objects:
-                if data.mode == "rolled":
-                    fp.process_and_convert_wsq(bitrate=bitrates[retries], type4=True)
-                else:
-                    fp.process_and_convert_wsq(bitrate=bitrates[retries])
-            
-            # Re-generate EFT
-            eft_path = generate_eft(gen_data, session_id, {fp.fp_number: fp for fp in fp_objects}, mode=data.mode)
-            current_size = os.path.getsize(eft_path)
-            retries += 1
-        
-        # If file still exceeds limit after all retries, raise error
         if current_size > max_size:
-            raise HTTPException(status_code=400, detail=f"EFT size ({current_size} bytes) exceeds 11.8MB limit even after compression.")
+            raise HTTPException(status_code=400, detail=f"EFT size ({current_size} bytes) exceeds 12.0MB limit even after compression.")
         
         # Determine Filename
         fname = data.type2_data.get("fname", "Unknown")
@@ -591,9 +601,48 @@ async def generate_eft_endpoint(data: GenerateRequest):
         # Rename the generated file to the user-friendly name
         new_path = os.path.join(session_dir, filename)
         shutil.move(eft_path, new_path)
-        
-        # Return download URL with session path and filename
-        return {"download_url": f"/api/download/{session_id}/{filename}", "filename": filename}
+
+        response = {
+            "download_url": f"/api/download/{session_id}/{filename}",
+            "filename": filename,
+        }
+
+        # ── Reduced Filesize Mode (≤5 MB) ─────────────────────────────────
+        # Generate a reduced-size variant if the full EFT exceeds 5 MB.
+        # WSQ floor is 0.75 (FBI minimum — never go below).
+        REDUCED_MAX = 5.0 * 1024 * 1024
+        WSQ_FLOOR = 0.75
+        full_size = os.path.getsize(new_path)
+
+        if full_size > REDUCED_MAX:
+            reduced_filename = f"EFT-{safe_fname}-{safe_lname}-reduced.eft"
+            reduced_path = os.path.join(session_dir, reduced_filename)
+
+            candidate = generate_eft(
+                gen_data, session_id,
+                {fp.fp_number: fp for fp in fp_objects},
+                mode=data.mode,
+                max_size_bytes=REDUCED_MAX,
+                allow_scale_down=True
+            )
+            candidate_size = os.path.getsize(candidate)
+            shutil.move(candidate, reduced_path)
+
+            reduced_warning = None
+            if candidate_size > REDUCED_MAX:
+                reduced_warning = (
+                    f"Could not achieve ≤5 MB at minimum WSQ bitrate ({WSQ_FLOOR}). "
+                    f"Reduced file is {candidate_size / (1024*1024):.1f} MB."
+                )
+
+            response["reduced_download_url"] = f"/api/download/{session_id}/{reduced_filename}"
+            response["reduced_filename"] = reduced_filename
+            if reduced_warning:
+                response["reduced_warning"] = reduced_warning
+
+        return response
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"EFT Generation failed: {str(e)}")
 

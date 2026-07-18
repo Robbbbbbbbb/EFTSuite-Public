@@ -26,8 +26,9 @@ RUN if [ ! -f /app/nbis/setup.sh ]; then \
     fi
 
 # Build NBIS
-# Ensure all scripts and configure files are executable before building
-RUN find /app/nbis -type f -name "*.sh" -exec chmod +x {} + && \
+# Ensure all scripts and configure files have LF line endings and are executable before building
+RUN find /app/nbis -type f \( -name "*.sh" -o -name "configure" -o -name "Makefile*" -o -name "*.in" \) -exec sed -i 's/\r$//' {} + && \
+    find /app/nbis -type f -name "*.sh" -exec chmod +x {} + && \
     find /app/nbis -type f -name "configure" -exec chmod +x {} + && \
     cd /app/nbis && \
     ./setup.sh /usr/local --without-X11 && \
