@@ -18,7 +18,12 @@ def apply_crop_and_rotate(img_path, rotate_angle, crop_rect):
     img = cv2.imread(img_path)
     if img is None:
         raise ValueError("Image not found")
-        
+
+    # Compute source DPI before any transformation.
+    # FBI FD-258 card is 8" along its longest dimension; use that to estimate scan resolution.
+    src_h, src_w = img.shape[:2]
+    source_dpi = max(src_w, src_h) / 8.0
+
     # 1. Rotate
     if rotate_angle != 0:
         if rotate_angle == 90:
@@ -27,20 +32,30 @@ def apply_crop_and_rotate(img_path, rotate_angle, crop_rect):
             img = cv2.rotate(img, cv2.ROTATE_180)
         elif rotate_angle == 270:
             img = cv2.rotate(img, cv2.ROTATE_90_COUNTERCLOCKWISE)
-            
+
     # 2. Crop
     x, y, w, h = int(crop_rect['x']), int(crop_rect['y']), int(crop_rect['w']), int(crop_rect['h'])
-    
+
     # Ensure bounds
     if x < 0: x = 0
     if y < 0: y = 0
     if x + w > img.shape[1]: w = img.shape[1] - x
     if y + h > img.shape[0]: h = img.shape[0] - y
-    
+
     if w > 0 and h > 0:
         img = img[y:y+h, x:x+w]
-        
+
     print(f"Resulting cropped shape: {img.shape}")
+
+    # 3. Downsample to 500 DPI if the source scan exceeded that threshold.
+    # Keeps downstream WSQ compression within the 12 MB EFT size limit.
+    if source_dpi > 500:
+        scale = 500.0 / source_dpi
+        new_w = max(1, int(img.shape[1] * scale))
+        new_h = max(1, int(img.shape[0] * scale))
+        img = cv2.resize(img, (new_w, new_h), interpolation=cv2.INTER_AREA)
+        print(f"Downsampled from ~{int(source_dpi)} DPI to 500 DPI: new shape {img.shape}")
+
     # For session simplicity, overwrite aligned.png
     return img
 
