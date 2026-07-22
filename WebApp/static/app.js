@@ -1124,6 +1124,9 @@ let captureSequence = [];
 let captureStepIndex = 0;
 let capturedPrints = {}; // Map of ID -> Base64
 let capturedPrintQualities = {}; // Map of ID -> NFIQ quality score
+let _redoCapturing = null;  // ID of fingerprint being re-captured (null = not in redo)
+let _redoReviewing = null;  // ID of fingerprint being reviewed after redo
+let _redoBackup    = null;  // {image, quality} backup so cancel can restore
 let currentCaptureImage = null;
 let currentCaptureQuality = 0; // NFIQ quality 0-100 (100=best) from last result
 let reconnectTimer = null;
@@ -1192,6 +1195,18 @@ function initCaptureMode() {
 
             currentCaptureImage = finalImg;
             currentCaptureQuality = msg.quality || 0;
+
+            // Redo mode — store result for the specific fingerprint being redone
+            if (_redoCapturing !== null) {
+                const redoId = _redoCapturing;
+                _redoCapturing = null;
+                _redoReviewing = redoId;
+                capturedPrints[redoId] = finalImg;
+                capturedPrintQualities[redoId] = currentCaptureQuality;
+                showCaptureResult(finalImg, currentCaptureQuality);
+                renderCaptureGallery();
+                return;
+            }
 
             // Check Express Mode
             const isExpress = document.getElementById('chk-express-mode').checked;
@@ -1412,6 +1427,21 @@ function renderCaptureGallery() {
             div.appendChild(imgWrap);
         }
 
+        // Redo button — only show when all captures done, not in express mode, not already redoing
+        const allDone = captureStepIndex >= captureSequence.length;
+        const isExpressMode = document.getElementById('chk-express-mode')?.checked;
+        const notRedoing = _redoCapturing === null && _redoReviewing === null;
+        if (allDone && !isExpressMode && notRedoing && capturedPrints[k] !== 'SKIP') {
+            const redoBtn = document.createElement('button');
+            redoBtn.textContent = '↺ Redo';
+            redoBtn.style.cssText = 'display:block;width:100%;margin-top:3px;padding:2px 0;font-size:10px;' +
+                'background:#555;color:#fff;border:none;border-radius:3px;cursor:pointer;';
+            redoBtn.onmouseover = () => redoBtn.style.background = '#e67e22';
+            redoBtn.onmouseout  = () => redoBtn.style.background = '#555';
+            redoBtn.onclick = (e) => { e.stopPropagation(); redoCapture(k); };
+            div.appendChild(redoBtn);
+        }
+
         container.appendChild(div);
     });
 
@@ -1475,6 +1505,27 @@ function cancelCapture() {
     isRolledPhase = false;
     rolledFingersReceived = 0;
     clearQualityOverlay();
+
+    // If cancelling a redo, restore the original capture
+    if (_redoCapturing !== null || _redoReviewing !== null) {
+        const k = _redoCapturing || _redoReviewing;
+        if (_redoBackup && _redoBackup.image) {
+            capturedPrints[k]        = _redoBackup.image;
+            capturedPrintQualities[k] = _redoBackup.quality;
+        }
+        _redoCapturing = null;
+        _redoReviewing = null;
+        _redoBackup    = null;
+        document.getElementById('btn-cap-accept').classList.add('hidden');
+        document.getElementById('btn-cap-retry').classList.add('hidden');
+        document.getElementById('btn-cap-cancel').classList.add('hidden');
+        document.getElementById('btn-cap-start').classList.remove('hidden');
+        document.getElementById('btn-cap-finalize').classList.remove('hidden');
+        document.getElementById('capture-instruction').textContent = 'All images captured.';
+        renderCaptureGallery();
+        return;
+    }
+
     resetCaptureButtons(true);
 }
 
@@ -1498,6 +1549,12 @@ function showCaptureResult(base64, quality) {
 function retryCapture() {
     currentCaptureImage = null;
     clearQualityOverlay();
+    if (_redoReviewing !== null) {
+        const k = _redoReviewing;
+        _redoReviewing = null;
+        redoCapture(k);
+        return;
+    }
     startCapture();
 }
 
@@ -1511,6 +1568,20 @@ function resetCapture() {
 }
 
 function acceptCapture() {
+    // Redo review — don't advance captureStepIndex, just return to "all done" state
+    if (_redoReviewing !== null) {
+        _redoReviewing = null;
+        _redoBackup = null;
+        clearQualityOverlay();
+        document.getElementById('btn-cap-accept').classList.add('hidden');
+        document.getElementById('btn-cap-retry').classList.add('hidden');
+        document.getElementById('btn-cap-start').classList.remove('hidden');
+        document.getElementById('btn-cap-finalize').classList.remove('hidden');
+        document.getElementById('capture-instruction').textContent = 'All images captured.';
+        renderCaptureGallery();
+        return;
+    }
+
     const currentItem = captureSequence[captureStepIndex];
     if (currentItem && currentCaptureImage) {
         capturedPrints[currentItem.id] = currentCaptureImage;
@@ -1520,6 +1591,33 @@ function acceptCapture() {
         updateCaptureUI();
         checkExpressAutoAdvance();
     }
+}
+
+function redoCapture(k) {
+    const item = captureSequence.find(i => i.id === k);
+    if (!item || !ws || ws.readyState !== WebSocket.OPEN) return;
+
+    // Backup existing capture so cancel can restore it
+    _redoBackup = {
+        image:   capturedPrints[k],
+        quality: capturedPrintQualities[k]
+    };
+    delete capturedPrints[k];
+    delete capturedPrintQualities[k];
+    _redoCapturing = k;
+
+    ws.send(JSON.stringify({ command: 'CAPTURE', fp_number: k }));
+    logToConsole(`Redoing: ${item.label}`);
+
+    document.getElementById('capture-instruction').textContent = `Redo: ${item.label}`;
+    document.getElementById('btn-cap-finalize').classList.add('hidden');
+    document.getElementById('btn-cap-start').classList.add('hidden');
+    document.getElementById('btn-cap-skip').classList.add('hidden');
+    document.getElementById('btn-cap-accept').classList.add('hidden');
+    document.getElementById('btn-cap-retry').classList.add('hidden');
+    document.getElementById('btn-cap-cancel').classList.remove('hidden');
+    document.getElementById('scanner-preview').style.opacity = '1.0';
+    renderCaptureGallery();
 }
 
 function checkExpressAutoAdvance() {

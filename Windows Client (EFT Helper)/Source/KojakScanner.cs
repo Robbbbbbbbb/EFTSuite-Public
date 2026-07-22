@@ -125,6 +125,9 @@ public class KojakScanner : IDisposable
 				// Turn on LED operation mode so SetLEDs calls take effect
 				{ int rcM = DLL._IBSU_SetLEOperationMode(_devHandle, DLL.IBSU_LEOperationMode.ENUM_IBSU_LE_OPERATION_ON); Console.WriteLine($"[LED] SetLEOperationMode(ON) init rc={rcM}"); }
 
+				// Pre-warm NFIQ2 so it's ready for the first capture (avoids NFIQ1 fallback on express mode)
+				EnsureNfiq2Initialized();
+
 				DLL._IBSU_RegisterCallbacks(_devHandle,
 					DLL.IBSU_Events.ENUM_IBSU_ESSENTIAL_EVENT_PREVIEW_IMAGE,
 					_callbackPreviewImage, IntPtr.Zero);

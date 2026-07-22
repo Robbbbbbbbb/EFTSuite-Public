@@ -106,12 +106,12 @@ class SelectPageRequest(BaseModel):
 # Serves the main SPA.
 @app.get("/")
 async def read_index():
-    return FileResponse("static/index.html")
+    return FileResponse("static/index.html", headers={"Cache-Control": "no-store, no-cache, must-revalidate"})
 
 # Mobile phone QR scanner page
 @app.get("/scan")
 async def serve_scan():
-    return FileResponse("static/scan.html")
+    return FileResponse("static/scan.html", headers={"Cache-Control": "no-store, no-cache, must-revalidate"})
 
 # Returns server's LAN IP so the operator UI can display a phone-scan QR code
 @app.get("/api/local-ip")
