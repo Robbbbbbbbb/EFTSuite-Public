@@ -135,65 +135,30 @@ def get_nfiq_quality(image_path: str) -> int:
 
 def convert_wsq_to_raw(wsq_path: str) -> str:
     """
-    Decodes a WSQ file to a raw file using `dwsq`.
-    
+    Decodes a WSQ file to a bare raw pixmap file using `dwsq`.
+
+    Usage is `dwsq <outext> <image file> [-raw_out]`; the output is always
+    written to `<image file>.<outext>`. Without `-raw_out`, dwsq writes a
+    NIST IHead file instead (a 288-byte text header followed by the pixel
+    data) under that same `.raw` name, which is the wrong format here and
+    throws off any size check against width*height.
+
     Args:
         wsq_path: Path to the WSQ file.
-        
+
     Returns:
-        Path to the decoded raw file.
+        Path to the decoded raw pixmap file.
     """
-    # dwsq <file> creates <file>.raw (stripping extension if present? No, usually adds .raw)
-    # Actually dwsq usuall takes input.wsq and outputs input.raw if no args?
-    # Or dwsq <input> [-raw] ...
-    # From help: dwsq decompresses...
-    # Usage usually: dwsq file.wsq  -> produces file.raw in same dir.
-    
-    # Check if raw already exists
     base = os.path.splitext(wsq_path)[0]
     raw_path = base + ".raw"
-    
-    if os.path.exists(raw_path):
-        return raw_path
-        
-    # Run dwsq
-    # Try 1: dwsq raw <file>
-    command = ["dwsq", "raw", os.path.basename(wsq_path)]
-    stdout, stderr, returncode = run_command(command, cwd=os.path.dirname(wsq_path))
-    
-    if os.path.exists(raw_path):
-        return raw_path
-        
-    # Try 2: dwsq <file> (defaults to .raw output often)
-    command = ["dwsq", os.path.basename(wsq_path)]
-    stdout, stderr, returncode = run_command(command, cwd=os.path.dirname(wsq_path))
-    
-    if os.path.exists(raw_path):
-        return raw_path
-        
-    # Try 3: Append -raw flag if supported
-    command = ["dwsq", "-raw", os.path.basename(wsq_path)]
+
+    command = ["dwsq", "raw", os.path.basename(wsq_path), "-raw_out"]
     stdout, stderr, returncode = run_command(command, cwd=os.path.dirname(wsq_path))
 
     if os.path.exists(raw_path):
         return raw_path
-
-    # Check for file.wsq.raw pattern in case tool appended
-    if os.path.exists(wsq_path + ".raw"):
-         return wsq_path + ".raw"
 
     raise Exception(f"dwsq failed to produce raw file. Last error: {stderr}")
-             
-    # Verify result
-    if os.path.exists(raw_path):
-        return raw_path
-        
-    # Fallback check for different naming convention
-    # e.g. file.wsq.raw
-    if os.path.exists(wsq_path + ".raw"):
-        return wsq_path + ".raw"
-        
-    raise Exception(f"dwsq ran but output file not found for {wsq_path}")
 
 def convert_to_wsq(raw_path: str, output_path: str, width: int, height: int, bitrate: float = 2.25, depth: int = 8, ppi: int = 500) -> str:
     """
@@ -211,29 +176,32 @@ def convert_to_wsq(raw_path: str, output_path: str, width: int, height: int, bit
     Returns:
         Path to the generated WSQ file.
     """
-    # cwsq <rate> wsq <outfile> -r <infile> <w> <h> <depth> <ppi>
-    # Note: cwsq arguments might vary by version, but this is the standard NBIS usage.
-    
+    # cwsq <r bitrate> <outext> <image file> [-raw_in w,h,d,[ppi]] [comment file]
+    # w,h,d,ppi must be a single comma-joined token, not separate args.
+    ext = os.path.splitext(output_path)[1].lstrip(".")
+
     command = [
-        "cwsq", 
-        str(bitrate), 
-        "wsq", 
-        output_path, 
-        "-r", 
-        raw_path, 
-        str(width), 
-        str(height), 
-        str(depth), 
-        str(ppi)
+        "cwsq",
+        str(bitrate),
+        ext,
+        raw_path,
+        "-raw_in",
+        f"{width},{height},{depth},{ppi}"
     ]
-    
+
     stdout, stderr, returncode = run_command(command, cwd=os.path.dirname(raw_path))
-    
+
     if returncode != 0:
         raise Exception(f"cwsq failed: {stderr}")
-        
+
+    # cwsq names its output after raw_path (extension stripped) + outext,
+    # which may differ from the caller's requested output_path.
+    produced_path = os.path.splitext(raw_path)[0] + "." + ext
+    if produced_path != output_path and os.path.exists(produced_path):
+        os.replace(produced_path, output_path)
+
     if not os.path.exists(output_path):
         raise Exception(f"cwsq failed to create output file: {stderr}")
-        
+
     return output_path
 
