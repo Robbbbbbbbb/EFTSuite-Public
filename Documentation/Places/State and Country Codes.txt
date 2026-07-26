@@ -348,3 +348,4 @@ ZA = Zacatecas
 ZR = Zaire, Republic of
 ZM = Zambia, Republic of
 RH = Zimbabwe, Republic of
+HD = Honduras
